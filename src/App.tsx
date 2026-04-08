@@ -73,7 +73,12 @@ interface PetState {
   level: number;
   experience: number;
   lastReaction?: 'happy' | 'eating' | 'drinking' | 'hatching' | null;
+  dailyGoalProgress: number;
+  lastStudyDate: string;
+  speech: string | null;
 }
+
+const DAILY_GOAL = 5; // Number of study actions per day
 
 interface Inventory {
   sunlight: number;
@@ -220,7 +225,7 @@ async function generateWordDetails(words: string[]): Promise<WordEntry[]> {
 
 // --- Components ---
 
-const PetVisual = ({ pet, scale = 1 }: { pet: PetState, scale?: number }) => {
+const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, onPet?: () => void }) => {
   const isEgg = pet.stage === 'egg';
   const isBaby = pet.stage === 'baby';
   const isAdult = pet.stage === 'adult';
@@ -247,6 +252,21 @@ const PetVisual = ({ pet, scale = 1 }: { pet: PetState, scale?: number }) => {
 
   return (
     <div className="relative flex items-center justify-center" style={{ transform: `scale(${scale})` }}>
+      {/* Speech Bubble */}
+      <AnimatePresence>
+        {pet.speech && (
+          <motion.div
+            initial={{ opacity: 0, y: 20, scale: 0.8 }}
+            animate={{ opacity: 1, y: -140 * scale, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.8 }}
+            className="absolute z-50 bg-white px-6 py-3 rounded-3xl shadow-2xl border-4 border-pink-100 min-w-[200px] text-center"
+          >
+            <p className="text-gray-700 font-bold text-lg">{pet.speech}</p>
+            <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 w-6 h-6 bg-white border-r-4 border-b-4 border-pink-100 rotate-45" />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Glow Effect */}
       <motion.div
         animate={{
@@ -261,6 +281,7 @@ const PetVisual = ({ pet, scale = 1 }: { pet: PetState, scale?: number }) => {
       />
 
       <motion.div
+        onClick={onPet}
         animate={pet.lastReaction ? {
           y: [0, -40, 0],
           scale: [1, 1.1, 1],
@@ -279,7 +300,7 @@ const PetVisual = ({ pet, scale = 1 }: { pet: PetState, scale?: number }) => {
           repeat: Infinity,
           ease: "easeInOut"
         }}
-        className="relative z-10"
+        className={cn("relative z-10 cursor-pointer", !onPet && "pointer-events-none")}
       >
         {isEgg ? (
           <div className="relative">
@@ -568,7 +589,10 @@ export default function App() {
     grassCount: 0,
     fruitCount: 0,
     level: 1,
-    experience: 0
+    experience: 0,
+    dailyGoalProgress: 0,
+    lastStudyDate: new Date().toISOString().split('T')[0],
+    speech: null
   });
   const [inventory, setInventory] = useState<Inventory>({
     sunlight: 0,
@@ -638,6 +662,62 @@ export default function App() {
     setPoints(prev => prev + amount);
   };
 
+  const completeStudyAction = (pointsAmount: number) => {
+    addPoints(pointsAmount);
+    setPet(prev => {
+      const newProgress = prev.dailyGoalProgress + 1;
+      let speech = prev.speech;
+      if (newProgress === DAILY_GOAL) {
+        speech = "太棒了！今天的学习目标完成啦！奖励你一个大大的拥抱！";
+      } else if (newProgress < DAILY_GOAL) {
+        speech = `加油！再完成 ${DAILY_GOAL - newProgress} 个练习就达到今天的目标了！`;
+      }
+      return { ...prev, dailyGoalProgress: newProgress, speech };
+    });
+    // Clear speech after 5 seconds
+    setTimeout(() => {
+      setPet(prev => ({ ...prev, speech: null }));
+    }, 5000);
+  };
+
+  const petThePet = () => {
+    if (!pet.isAdopted) return;
+    const messages = [
+      "摸摸头，真舒服呀！",
+      "主人最棒了，我们一起加油学习吧！",
+      "今天也要元气满满哦！",
+      "你读单词的声音真好听！",
+      "别忘了完成今天的学习目标哦！"
+    ];
+    const randomMessage = messages[Math.floor(Math.random() * messages.length)];
+    
+    setPet(prev => ({ 
+      ...prev, 
+      lastReaction: 'happy',
+      speech: randomMessage 
+    }));
+    
+    setTimeout(() => {
+      setPet(prev => ({ ...prev, lastReaction: null, speech: null }));
+    }, 3000);
+  };
+
+  // Daily reset logic
+  useEffect(() => {
+    const today = new Date().toISOString().split('T')[0];
+    if (pet.lastStudyDate !== today) {
+      setPet(prev => ({
+        ...prev,
+        dailyGoalProgress: 0,
+        lastStudyDate: today,
+        speech: "新的一天开始啦！今天要也要加油学习哦！"
+      }));
+      setTimeout(() => {
+        setPet(prev => ({ ...prev, speech: null }));
+      }, 5000);
+    }
+  }, [pet.lastStudyDate]);
+
   const startRecording = async (target: string) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -667,7 +747,7 @@ export default function App() {
           
           // Award points based on score
           if (result.score >= 60) {
-            addPoints(3);
+            completeStudyAction(3);
           }
         };
         stream.getTracks().forEach(track => track.stop());
@@ -883,7 +963,7 @@ export default function App() {
     const currentWord = currentList.filter(w => !w.isMastered)[flashcardIndex];
     if (practiceInput.trim().toLowerCase() === currentWord.word.toLowerCase()) {
       setPracticeFeedback('correct');
-      addPoints(5); // Correct spelling awards 5 points
+      completeStudyAction(5); // Correct spelling awards 5 points
     } else {
       setPracticeFeedback('wrong');
     }
@@ -1053,7 +1133,7 @@ export default function App() {
                   ) : (
                     <div className="flex items-center gap-6">
                       <div className="w-24 h-24 bg-white rounded-3xl flex items-center justify-center shadow-inner overflow-hidden">
-                        <PetVisual pet={pet} scale={0.5} />
+                        <PetVisual pet={pet} scale={0.5} onPet={petThePet} />
                       </div>
                       <div className="flex-1">
                         <h3 className="text-xl font-black text-yellow-700">{pet.name} (Lv.{pet.level})</h3>
@@ -1191,7 +1271,7 @@ export default function App() {
                 ) : (
                   <Card className="w-full max-w-2xl p-12 text-center bg-gradient-to-b from-blue-50 to-white overflow-hidden">
                     <div className="relative mb-16 py-8">
-                      <PetVisual pet={pet} />
+                      <PetVisual pet={pet} onPet={petThePet} />
                     </div>
 
                     <div className="flex items-center justify-center gap-3 mb-2">
