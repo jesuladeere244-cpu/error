@@ -1,0 +1,5 @@
+{
+  "name": "萌萌单词本 - 四年级英语助手",
+  "description": "专为四年级小学生设计的可爱风英语单词学习助手，支持单词解析、例句生成、趣味背诵及宠物养成游戏。",
+  "requestFramePermissions": ["camera", "microphone"]
+}
