@@ -38,7 +38,9 @@ import {
   Mic,
   MicOff,
   History,
-  Award
+  Award,
+  Crown,
+  Check
 } from 'lucide-react';
 import { cn } from './lib/utils';
 import ReactMarkdown from 'react-markdown';
@@ -52,6 +54,7 @@ interface WordEntry {
   example: string;
   exampleTranslation: string;
   isMastered?: boolean;
+  type: 'english' | 'chinese';
 }
 
 interface StudyStats {
@@ -62,7 +65,7 @@ interface StudyStats {
 
 interface PetState {
   isAdopted: boolean;
-  type: 'cat' | 'dog' | 'rabbit' | 'dragon' | 'none';
+  type: 'cat' | 'dog' | 'rabbit' | 'dragon' | 'pig' | 'elephant' | 'panda' | 'penguin' | 'frog' | 'fox' | 'monkey' | 'koala' | 'tiger' | 'giraffe' | 'bear' | 'chick' | 'bee' | 'lion' | 'octopus' | 'zebra' | 'cow' | 'crab' | 'raccoon' | 'starfish' | 'axolotl' | 'none';
   stage: 'egg' | 'baby' | 'adult';
   name: string;
   sunlightCount: number;
@@ -72,10 +75,21 @@ interface PetState {
   fruitCount: number;
   level: number;
   experience: number;
-  lastReaction?: 'happy' | 'eating' | 'drinking' | 'hatching' | null;
+  lastReaction?: 'happy' | 'eating' | 'drinking' | 'hatching' | 'sunbathing' | null;
   dailyGoalProgress: number;
   lastStudyDate: string;
   speech: string | null;
+  hasChangedPet?: boolean;
+  learningPower: number;
+}
+
+interface ChildProfile {
+  id: 'child1' | 'child2';
+  grade: number;
+  pet: PetState;
+  words: WordEntry[];
+  points: number;
+  inventory: Inventory;
 }
 
 const DAILY_GOAL = 5; // Number of study actions per day
@@ -103,8 +117,9 @@ interface StudyList {
 // --- Gemini Service ---
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-async function evaluatePronunciation(targetText: string, audioBase64: string): Promise<PronunciationResult> {
-  const prompt = `你是一个小学英语老师。请听这段音频，并将其与目标文本 "${targetText}" 进行比较。
+async function evaluatePronunciation(targetText: string, audioBase64: string, type: 'english' | 'chinese'): Promise<PronunciationResult> {
+  const prompt = type === 'english' 
+    ? `你是一个小学英语老师。请听这段音频，并将其与目标文本 "${targetText}" 进行比较。
   
   请根据以下标准评分（0-100）：
   - 100分：发音完美，语调自然。
@@ -112,11 +127,20 @@ async function evaluatePronunciation(targetText: string, audioBase64: string): P
   - 80分以上：发音基本准确，有个别小瑕疵。
   - 70分以下：发音不准，需要多加练习。
   
+  请返回 JSON 格式，包含 score (数字) 和 feedback (简短的中文鼓励性评价)。`
+    : `你是一个小学语文老师。请听这段音频，并将其与目标汉字/词语 "${targetText}" 的发音进行比较。
+  
+  请根据以下标准评分（0-100）：
+  - 100分：字正腔圆，发音标准。
+  - 90分以上：发音清晰准确。
+  - 80分以上：发音基本正确。
+  - 70分以下：发音不准，需要多加练习。
+  
   请返回 JSON 格式，包含 score (数字) 和 feedback (简短的中文鼓励性评价)。`;
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-2.0-flash",
       contents: [
         { text: prompt },
         { 
@@ -147,19 +171,22 @@ async function evaluatePronunciation(targetText: string, audioBase64: string): P
   }
 }
 
-async function extractWordsFromImage(base64Image: string): Promise<string[]> {
-  const prompt = "请识别这张图片中的所有英语单词。这些通常是小学四年级课本上的单词。请只返回单词列表，用逗号隔开。";
+async function extractWordsFromImage(base64Data: string, grade: number): Promise<string[]> {
+  const prompt = `请识别这张图片中的所有英语单词或中文生字。这些通常是小学${grade}年级课本上的内容。请只返回单词或生字列表，用逗号隔开。`;
   
+  const mimeType = base64Data.split(';')[0].split(':')[1] || 'image/jpeg';
+  const base64 = base64Data.split(',')[1];
+
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-2.0-flash",
       contents: {
         parts: [
           { text: prompt },
           { 
             inlineData: { 
-              mimeType: "image/jpeg", 
-              data: base64Image.split(',')[1] 
+              mimeType: mimeType, 
+              data: base64
             } 
           }
         ]
@@ -168,30 +195,31 @@ async function extractWordsFromImage(base64Image: string): Promise<string[]> {
 
     const text = response.text;
     if (!text) return [];
-    return text.split(/[,\s\n]+/).filter(w => /^[a-zA-Z]+$/.test(w.trim()));
+    return text.split(/[,\s\n]+/).filter(w => w.trim().length > 0);
   } catch (error) {
     console.error("Gemini OCR Error:", error);
     throw error;
   }
 }
 
-async function generateWordDetails(words: string[]): Promise<WordEntry[]> {
+async function generateWordDetails(words: string[], grade: number): Promise<WordEntry[]> {
   if (words.length === 0) return [];
   
-  const prompt = `你是一个小学英语老师。请为以下四年级英语单词（新版人教版 PEP）提供详细解析。
-  单词列表：${words.join(', ')}
+  const prompt = `你是一个小学老师。请为以下${grade}年级单词或生字提供详细解析。
+  列表：${words.join(', ')}
   
   要求：
-  1. 提供音标。
-  2. 提供准确的中文含义（适合四年级学生理解）。
-  3. 提供一个简单有趣的英文例句，并附带中文翻译。
-  4. 例句要贴近四年级小学生的日常生活。
+  1. 如果是英语单词，提供音标；如果是中文生字，提供拼音。
+  2. 提供准确的中文含义（如果是英语）或英文含义/简单中文解释（如果是中文），适合${grade}年级学生理解。
+  3. 提供一个简单有趣的例句，并附带翻译。
+  4. 例句要贴近${grade}年级小学生的日常生活。
+  5. 标记类型 type 为 'english' 或 'chinese'。
   
   请以 JSON 数组格式返回。`;
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-2.0-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -206,8 +234,9 @@ async function generateWordDetails(words: string[]): Promise<WordEntry[]> {
               meaning: { type: Type.STRING },
               example: { type: Type.STRING },
               exampleTranslation: { type: Type.STRING },
+              type: { type: Type.STRING, enum: ['english', 'chinese'] },
             },
-            required: ["id", "word", "phonetic", "meaning", "example", "exampleTranslation"],
+            required: ["id", "word", "phonetic", "meaning", "example", "exampleTranslation", "type"],
           },
         },
       },
@@ -229,29 +258,114 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
   const isEgg = pet.stage === 'egg';
   const isBaby = pet.stage === 'baby';
   const isAdult = pet.stage === 'adult';
+  
+    // Evolution milestones
+    const isLevel5Plus = pet.level >= 5;
+    const isLevel10Plus = pet.level >= 10;
+    const isLevel15Plus = pet.level >= 15;
+    const isLevel20Plus = pet.level >= 20;
+    
+    // Force adult visuals if level is high enough
+    const isAdultVisually = isAdult || isLevel5Plus;
 
-  const getPetIcon = (size: number) => {
-    switch (pet.type) {
-      case 'cat': return <Heart size={size * scale} fill="currentColor" />;
-      case 'dog': return <Star size={size * scale} fill="currentColor" />;
-      case 'rabbit': return <Cloud size={size * scale} fill="currentColor" />;
-      case 'dragon': return <Sparkles size={size * scale} fill="currentColor" />;
-      default: return <Heart size={size * scale} fill="currentColor" />;
-    }
-  };
+    const getPetIcon = (size: number) => {
+      const iconSize = isAdultVisually ? size * 1.2 : size;
+      switch (pet.type) {
+        case 'cat': return <Heart size={iconSize * scale} fill="currentColor" />;
+        case 'dog': return <Star size={iconSize * scale} fill="currentColor" />;
+        case 'rabbit': return <Cloud size={iconSize * scale} fill="currentColor" />;
+        case 'dragon': return <Sparkles size={iconSize * scale} fill="currentColor" />;
+        case 'pig': return <Heart size={iconSize * scale} fill="currentColor" />;
+        case 'elephant': return <Cloud size={iconSize * scale} fill="currentColor" />;
+        case 'panda': return <Circle size={iconSize * scale} fill="currentColor" />;
+        case 'penguin': return <Star size={iconSize * scale} fill="currentColor" />;
+        case 'frog': return <Circle size={iconSize * scale} fill="currentColor" />;
+        case 'fox': return <Sparkles size={iconSize * scale} fill="currentColor" />;
+        case 'monkey': return <Circle size={iconSize * scale} fill="currentColor" />;
+        case 'koala': return <Circle size={iconSize * scale} fill="currentColor" />;
+        case 'tiger': return <Star size={iconSize * scale} fill="currentColor" />;
+        case 'giraffe': return <Star size={iconSize * scale} fill="currentColor" />;
+        case 'bear': return (
+          <div className="relative flex flex-col items-center">
+             <div className={cn(
+               "bg-amber-100 rounded-full flex items-center justify-center",
+               isAdultVisually ? "w-20 h-16" : "w-14 h-10"
+             )}>
+               <div className="w-2 h-2 bg-amber-950 rounded-full" />
+             </div>
+          </div>
+        );
+        case 'chick': return <Sun size={iconSize * scale} fill="currentColor" />;
+        case 'bee': return <Sparkles size={iconSize * scale} fill="currentColor" />;
+        default: return <Heart size={iconSize * scale} fill="currentColor" />;
+      }
+    };
 
   const getPetColor = () => {
+    if (isAdultVisually) {
+      switch (pet.type) {
+        case 'bear': return 'bg-amber-950'; // Darker for adult
+        case 'cat': return 'bg-orange-600';
+        case 'dog': return 'bg-blue-700';
+        case 'rabbit': return 'bg-pink-400';
+        default: break;
+      }
+    }
     switch (pet.type) {
-      case 'cat': return "bg-orange-400";
-      case 'dog': return "bg-blue-400";
-      case 'rabbit': return "bg-pink-400";
-      case 'dragon': return "bg-green-400";
-      default: return "bg-pink-400";
+      case 'cat': return 'bg-orange-400';
+      case 'dog': return 'bg-blue-500';
+      case 'rabbit': return 'bg-pink-300';
+      case 'dragon': return 'bg-green-600';
+      case 'pig': return 'bg-pink-200';
+      case 'elephant': return 'bg-blue-300';
+      case 'panda': return 'bg-white border-4 border-slate-200';
+      case 'penguin': return 'bg-slate-800';
+      case 'frog': return 'bg-emerald-500';
+      case 'fox': return 'bg-orange-600';
+      case 'monkey': return 'bg-amber-700';
+      case 'koala': return 'bg-slate-400';
+      case 'tiger': return 'bg-orange-500';
+      case 'giraffe': return 'bg-yellow-500';
+      case 'bear': return 'bg-amber-900';
+      case 'chick': return 'bg-yellow-400';
+      case 'bee': return 'bg-yellow-300';
+      case 'lion': return 'bg-amber-500';
+      case 'octopus': return 'bg-blue-400';
+      case 'zebra': return 'bg-white border-4 border-slate-300';
+      case 'cow': return 'bg-white border-4 border-slate-100';
+      case 'crab': return 'bg-red-500';
+      case 'raccoon': return 'bg-slate-500';
+      case 'starfish': return 'bg-pink-400';
+      case 'axolotl': return 'bg-pink-100';
+      default: return 'bg-pink-100';
     }
   };
 
   return (
     <div className="relative flex items-center justify-center" style={{ transform: `scale(${scale})` }}>
+      {/* Sun Effect */}
+      <AnimatePresence>
+        {pet.lastReaction === 'sunbathing' && (
+          <motion.div 
+            initial={{ y: -100, opacity: 0, scale: 0 }}
+            animate={{ y: -180, opacity: 1, scale: 2 }}
+            exit={{ y: -100, opacity: 0, scale: 0 }}
+            className="absolute text-yellow-500 z-20"
+          >
+            <Sun size={64} className="animate-spin-slow" />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Level 20+ Rainbow Aura */}
+      {isLevel20Plus && (
+        <motion.div
+          animate={{ rotate: 360 }}
+          transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
+          className="absolute inset-0 -m-20 border-[12px] border-dashed border-pink-200/30 rounded-full blur-xl"
+        />
+      )}
+
       {/* Speech Bubble */}
       <AnimatePresence>
         {pet.speech && (
@@ -270,21 +384,24 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
       {/* Glow Effect */}
       <motion.div
         animate={{
-          scale: [1, 1.2, 1],
-          opacity: [0.2, 0.4, 0.2],
+          scale: isLevel15Plus ? [1, 1.4, 1] : [1, 1.2, 1],
+          opacity: isLevel15Plus ? [0.3, 0.6, 0.3] : [0.2, 0.4, 0.2],
         }}
         transition={{ duration: 3, repeat: Infinity }}
         className={cn(
           "absolute inset-0 blur-3xl rounded-full",
-          isEgg ? "bg-yellow-200" : getPetColor().replace('bg-', 'bg-')
+          isEgg ? "bg-yellow-200" : isLevel15Plus ? "bg-gradient-to-tr from-pink-300 via-purple-300 to-blue-300" : getPetColor().replace('bg-', 'bg-')
         )}
       />
 
       <motion.div
         onClick={onPet}
-        animate={pet.lastReaction ? {
+        animate={pet.lastReaction === 'happy' ? {
           y: [0, -40, 0],
           scale: [1, 1.1, 1],
+        } : pet.lastReaction === 'sunbathing' ? {
+          scale: [1, 0.95, 1],
+          y: [0, 5, 0]
         } : isEgg ? {
           rotate: [0, -5, 5, -5, 5, 0],
           scale: pet.sunlightCount > 0 ? [1, 1.05, 1] : 1
@@ -334,6 +451,17 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
           </div>
         ) : (
           <div className="relative group">
+            {/* Level 10+ Crown */}
+            {isLevel10Plus && (
+              <motion.div
+                initial={{ y: -20, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                className="absolute -top-12 left-1/2 -translate-x-1/2 z-20 text-yellow-400 drop-shadow-lg"
+              >
+                <Crown size={40 * scale} fill="currentColor" />
+              </motion.div>
+            )}
+
             {/* Pet Specific Features (Ears/Horns/Wings/Tails) */}
             <div className="absolute inset-0 -top-6 flex justify-center gap-12 pointer-events-none">
               {pet.type === 'rabbit' && (
@@ -370,21 +498,76 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
                   />
                 </>
               )}
-              {pet.type === 'dragon' && (
+              {pet.type === 'pig' && (
                 <>
-                  <div className="w-8 h-12 bg-green-600 rounded-t-full border-2 border-green-700" />
-                  <div className="w-8 h-12 bg-green-600 rounded-t-full border-2 border-green-700" />
+                  <div className="w-8 h-8 bg-pink-200 rounded-full border-4 border-pink-300 -mt-2" />
+                  <div className="w-8 h-8 bg-pink-200 rounded-full border-4 border-pink-300 -mt-2" />
+                </>
+              )}
+              {pet.type === 'elephant' && (
+                <>
+                  <div className="w-16 h-16 bg-blue-200 rounded-full border-4 border-blue-300 absolute -left-8 top-4" />
+                  <div className="w-16 h-16 bg-blue-200 rounded-full border-4 border-blue-300 absolute -right-8 top-4" />
+                </>
+              )}
+              {pet.type === 'panda' && (
+                <>
+                  <div className="w-10 h-10 bg-slate-800 rounded-full border-4 border-black -mt-2" />
+                  <div className="w-10 h-10 bg-slate-800 rounded-full border-4 border-black -mt-2" />
+                </>
+              )}
+              {pet.type === 'fox' && (
+                <>
+                  <div className="w-12 h-12 bg-orange-600 rotate-45 rounded-sm border-4 border-orange-700 -mt-4" />
+                  <div className="w-12 h-12 bg-orange-600 rotate-45 rounded-sm border-4 border-orange-700 -mt-4" />
+                </>
+              )}
+              {pet.type === 'bear' && (
+                <>
+                  <div className="w-10 h-10 bg-amber-900 rounded-full border-4 border-amber-950 -mt-2" />
+                  <div className="w-10 h-10 bg-amber-900 rounded-full border-4 border-amber-950 -mt-2" />
+                </>
+              )}
+              {pet.type === 'koala' && (
+                <>
+                  <div className="w-14 h-14 bg-slate-400 rounded-full border-4 border-slate-500 absolute -left-6 top-2" />
+                  <div className="w-14 h-14 bg-slate-400 rounded-full border-4 border-slate-500 absolute -right-6 top-2" />
+                </>
+              )}
+              {pet.type === 'lion' && (
+                <div className="absolute -inset-4 bg-orange-400 rounded-full border-4 border-orange-500 -z-10" />
+              )}
+              {pet.type === 'giraffe' && (
+                <>
+                  <div className="w-4 h-12 bg-yellow-500 rounded-full border-2 border-yellow-600 -mt-8" />
+                  <div className="w-4 h-12 bg-yellow-500 rounded-full border-2 border-yellow-600 -mt-8" />
+                </>
+              )}
+              {(pet.type === 'dragon' || isLevel15Plus) && (
+                <>
                   {/* Wings */}
                   <motion.div 
                     animate={{ rotateY: [0, 60, 0], x: [-60, -80, -60] }}
                     transition={{ duration: 1, repeat: Infinity }}
-                    className="absolute top-10 left-0 w-24 h-16 bg-green-500/80 rounded-full border-4 border-green-600 origin-right -z-10"
+                    className={cn(
+                      "absolute top-10 left-0 w-24 h-16 rounded-full border-4 origin-right -z-10",
+                      pet.type === 'dragon' ? "bg-green-500/80 border-green-600" : "bg-white/60 border-pink-200"
+                    )}
                   />
                   <motion.div 
                     animate={{ rotateY: [0, -60, 0], x: [60, 80, 60] }}
                     transition={{ duration: 1, repeat: Infinity }}
-                    className="absolute top-10 right-0 w-24 h-16 bg-green-500/80 rounded-full border-4 border-green-600 origin-left -z-10"
+                    className={cn(
+                      "absolute top-10 right-0 w-24 h-16 rounded-full border-4 origin-left -z-10",
+                      pet.type === 'dragon' ? "bg-green-500/80 border-green-600" : "bg-white/60 border-pink-200"
+                    )}
                   />
+                </>
+              )}
+              {pet.type === 'dragon' && (
+                <>
+                  <div className="w-8 h-12 bg-green-600 rounded-t-full border-2 border-green-700" />
+                  <div className="w-8 h-12 bg-green-600 rounded-t-full border-2 border-green-700" />
                 </>
               )}
             </div>
@@ -418,35 +601,114 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
             </div>
 
             <div className={cn(
-              "rounded-[3rem] flex items-center justify-center text-white shadow-2xl relative overflow-hidden",
+              "rounded-[3rem] flex items-center justify-center text-white shadow-2xl relative overflow-hidden transition-all duration-700",
               isBaby ? "w-36 h-36" : "w-48 h-48",
-              getPetColor()
+              isAdultVisually && "scale-110 ring-4 ring-white/50",
+              getPetColor(),
+              isLevel20Plus && "ring-8 ring-yellow-300 ring-offset-4 ring-offset-white"
             )}>
+              {/* Evolution Aura for Adults */}
+              {isAdultVisually && (
+                <motion.div 
+                  animate={{ opacity: [0.1, 0.3, 0.1] }}
+                  transition={{ duration: 2, repeat: Infinity }}
+                  className="absolute inset-0 bg-gradient-to-t from-white/20 to-transparent"
+                />
+              )}
               {/* Internal Shine */}
               <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-br from-white/30 to-transparent pointer-events-none" />
               
-              {getPetIcon(isBaby ? 72 : 96)}
+              {/* Internal Patterns/Features */}
+              {pet.type === 'panda' && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                  <div className="w-full h-1/2 bg-white absolute top-0" />
+                  <div className="w-full h-1/2 bg-slate-800 absolute bottom-0" />
+                  <div className="absolute top-1/3 left-1/4 w-8 h-10 bg-slate-900 rounded-full rotate-12 blur-[1px]" />
+                  <div className="absolute top-1/3 right-1/4 w-8 h-10 bg-slate-900 rounded-full -rotate-12 blur-[1px]" />
+                </div>
+              )}
+              {pet.type === 'penguin' && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="w-3/4 h-3/4 bg-white rounded-full mt-8" />
+                </div>
+              )}
+              {pet.type === 'tiger' && (
+                <div className="absolute inset-0 opacity-20">
+                  <div className="absolute top-4 left-0 w-12 h-2 bg-black rounded-r-full" />
+                  <div className="absolute top-12 left-0 w-8 h-2 bg-black rounded-r-full" />
+                  <div className="absolute top-4 right-0 w-12 h-2 bg-black rounded-l-full" />
+                  <div className="absolute top-12 right-0 w-8 h-2 bg-black rounded-l-full" />
+                </div>
+              )}
+              {pet.type === 'bee' && (
+                <div className="absolute inset-0 flex flex-col justify-around py-4 opacity-30">
+                  <div className="w-full h-4 bg-black" />
+                  <div className="w-full h-4 bg-black" />
+                  <div className="w-full h-4 bg-black" />
+                </div>
+              )}
+              {pet.type === 'pig' && (
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 w-12 h-8 bg-pink-400 rounded-2xl border-2 border-pink-500 flex items-center justify-center gap-2">
+                  <div className="w-2 h-2 bg-pink-600 rounded-full" />
+                  <div className="w-2 h-2 bg-pink-600 rounded-full" />
+                </div>
+              )}
+              {pet.type === 'elephant' && (
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 w-8 h-16 bg-blue-300 rounded-b-full border-2 border-blue-400 origin-top" />
+              )}
+              {pet.type === 'chick' && (
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 w-6 h-4 bg-orange-400 rounded-full border-2 border-orange-500" />
+              )}
+              
+              <div className="mt-8">
+                {getPetIcon(isBaby ? 72 : 96)}
+              </div>
 
-              {/* Eyes */}
-              <div className="absolute top-1/3 left-0 w-full flex justify-center gap-8">
-                <motion.div 
-                  animate={{ scaleY: [1, 1, 0.1, 1, 1] }}
-                  transition={{ duration: 4, repeat: Infinity, times: [0, 0.45, 0.5, 0.55, 1] }}
-                  className="w-3 h-3 bg-white rounded-full" 
-                  style={{ width: 3 * scale, height: 3 * scale }}
-                />
-                <motion.div 
-                  animate={{ scaleY: [1, 1, 0.1, 1, 1] }}
-                  transition={{ duration: 4, repeat: Infinity, times: [0, 0.45, 0.5, 0.55, 1] }}
-                  className="w-3 h-3 bg-white rounded-full" 
-                  style={{ width: 3 * scale, height: 3 * scale }}
-                />
+              {/* Eyes - Moved AFTER the icon and positioned carefully */}
+              <div className="absolute top-[25%] left-0 w-full flex justify-center gap-10 z-20">
+                {pet.lastReaction === 'sunbathing' ? (
+                  <>
+                    {/* Sunglasses */}
+                    <div className="w-10 h-6 bg-black rounded-full border-2 border-slate-700" />
+                    <div className="w-10 h-6 bg-black rounded-full border-2 border-slate-700" />
+                    <div className="absolute top-3 w-12 h-1 bg-black" />
+                  </>
+                ) : (
+                  <>
+                    <motion.div 
+                      animate={{ scaleY: [1, 1, 0.1, 1, 1] }}
+                      transition={{ duration: 4, repeat: Infinity, times: [0, 0.45, 0.5, 0.55, 1] }}
+                      className={cn(
+                        "rounded-full", 
+                        (isLevel15Plus || pet.type === 'frog') ? "bg-yellow-200 shadow-[0_0_10px_rgba(255,255,255,0.8)]" : "bg-white"
+                      )} 
+                      style={{ 
+                        width: (isAdultVisually ? 8 : 4) * scale, 
+                        height: (isAdultVisually ? 8 : 4) * scale,
+                        backgroundColor: pet.type === 'bear' ? '#000' : undefined // Bear has black eyes
+                      }}
+                    />
+                    <motion.div 
+                      animate={{ scaleY: [1, 1, 0.1, 1, 1] }}
+                      transition={{ duration: 4, repeat: Infinity, times: [0, 0.45, 0.5, 0.55, 1] }}
+                      className={cn(
+                        "rounded-full", 
+                        (isLevel15Plus || pet.type === 'frog') ? "bg-yellow-200 shadow-[0_0_10px_rgba(255,255,255,0.8)]" : "bg-white"
+                      )} 
+                      style={{ 
+                        width: (isAdultVisually ? 8 : 4) * scale, 
+                        height: (isAdultVisually ? 8 : 4) * scale,
+                        backgroundColor: pet.type === 'bear' ? '#000' : undefined // Bear has black eyes
+                      }}
+                    />
+                  </>
+                )}
               </div>
 
               {/* Blushed Cheeks */}
-              <div className="absolute top-1/2 left-0 w-full flex justify-center gap-16 opacity-40">
-                <div className="w-4 h-2 bg-pink-200 rounded-full blur-[2px]" style={{ width: 4 * scale, height: 2 * scale }} />
-                <div className="w-4 h-2 bg-pink-200 rounded-full blur-[2px]" style={{ width: 4 * scale, height: 2 * scale }} />
+              <div className="absolute top-1/2 left-0 w-full flex justify-center gap-20 opacity-40">
+                <div className="w-6 h-3 bg-pink-200 rounded-full blur-[2px]" style={{ width: 6 * scale, height: 3 * scale }} />
+                <div className="w-6 h-3 bg-pink-200 rounded-full blur-[2px]" style={{ width: 6 * scale, height: 3 * scale }} />
               </div>
             </div>
 
@@ -460,11 +722,11 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
             </motion.div>
 
             {/* Adult Crown/Award */}
-            {isAdult && (
+            {isAdultVisually && (
               <motion.div 
                 initial={{ y: -20, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
-                className="absolute -top-10 left-1/2 -translate-x-1/2 text-yellow-500 drop-shadow-md"
+                className="absolute -top-10 left-1/2 -translate-x-1/2 text-yellow-500 drop-shadow-md z-30"
               >
                 <Award size={48 * scale} fill="currentColor" />
               </motion.div>
@@ -486,29 +748,30 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
                   {pet.lastReaction === 'eating' && "😋"}
                   {pet.lastReaction === 'drinking' && "💧"}
                   {pet.lastReaction === 'hatching' && "✨"}
+                  {pet.lastReaction === 'sunbathing' && "☀️"}
                 </motion.div>
               )}
             </AnimatePresence>
 
             {/* Floating Particles */}
             <AnimatePresence>
-              {[...Array(3)].map((_, i) => (
+              {[...Array(isLevel5Plus ? 6 : 3)].map((_, i) => (
                 <motion.div
                   key={i}
                   initial={{ opacity: 0, scale: 0, x: 0, y: 0 }}
                   animate={{ 
                     opacity: [0, 1, 0], 
                     scale: [0, 1, 0],
-                    x: (i - 1) * 40 * scale,
+                    x: (i - (isLevel5Plus ? 2.5 : 1)) * 40 * scale,
                     y: (-60 - (i * 20)) * scale
                   }}
                   transition={{ 
                     duration: 2, 
                     repeat: Infinity, 
-                    delay: i * 0.6,
+                    delay: i * 0.4,
                     ease: "easeOut"
                   }}
-                  className="absolute top-1/2 left-1/2 text-white/50"
+                  className={cn("absolute top-1/2 left-1/2", isLevel5Plus ? "text-yellow-300" : "text-white/50")}
                 >
                   <Sparkles size={16 * scale} />
                 </motion.div>
@@ -565,42 +828,120 @@ const Button = ({
 };
 
 export default function App() {
+  const [activeChildId, setActiveChildId] = useState<'child1' | 'child2'>('child1');
+  
+  const [child1, setChild1] = useState<ChildProfile>(() => {
+    const saved = localStorage.getItem('moemoe_child1');
+    if (saved) return JSON.parse(saved);
+    return {
+      id: 'child1',
+      grade: 2,
+      pet: {
+        isAdopted: false,
+        type: 'none',
+        stage: 'egg',
+        name: '未命名',
+        sunlightCount: 0,
+        foodCount: 0,
+        waterCount: 0,
+        grassCount: 0,
+        fruitCount: 0,
+        level: 1,
+        experience: 0,
+        dailyGoalProgress: 0,
+        lastStudyDate: new Date().toISOString().split('T')[0],
+        speech: null,
+        learningPower: 100
+      },
+      words: [],
+      points: 0,
+      inventory: { sunlight: 0, food: 0, water: 0, grass: 0, fruit: 0 }
+    };
+  });
+
+  const [child2, setChild2] = useState<ChildProfile>(() => {
+    const saved = localStorage.getItem('moemoe_child2');
+    if (saved) return JSON.parse(saved);
+    return {
+      id: 'child2',
+      grade: 4,
+      pet: {
+        isAdopted: false,
+        type: 'none',
+        stage: 'egg',
+        name: '未命名',
+        sunlightCount: 0,
+        foodCount: 0,
+        waterCount: 0,
+        grassCount: 0,
+        fruitCount: 0,
+        level: 1,
+        experience: 0,
+        dailyGoalProgress: 0,
+        lastStudyDate: new Date().toISOString().split('T')[0],
+        speech: null,
+        learningPower: 100
+      },
+      words: [],
+      points: 0,
+      inventory: { sunlight: 0, food: 0, water: 0, grass: 0, fruit: 0 }
+    };
+  });
+
+  const activeChild = activeChildId === 'child1' ? child1 : child2;
+  const otherChild = activeChildId === 'child1' ? child2 : child1;
+  const { pet, words, points, inventory } = activeChild;
+  const buddy = otherChild.pet.isAdopted ? otherChild.pet : null;
+  
+  const updateActiveChild = (updates: Partial<ChildProfile>) => {
+    if (activeChildId === 'child1') {
+      setChild1(prev => ({ ...prev, ...updates }));
+    } else {
+      setChild2(prev => ({ ...prev, ...updates }));
+    }
+  };
+
+  const updateActivePet = (updates: Partial<PetState>) => {
+    if (activeChildId === 'child1') {
+      setChild1(prev => ({ ...prev, pet: { ...prev.pet, ...updates } }));
+    } else {
+      setChild2(prev => ({ ...prev, pet: { ...prev.pet, ...updates } }));
+    }
+  };
+
+  const updateActiveInventory = (updates: Partial<Inventory>) => {
+    if (activeChildId === 'child1') {
+      setChild1(prev => ({ ...prev, inventory: { ...prev.inventory, ...updates } }));
+    } else {
+      setChild2(prev => ({ ...prev, inventory: { ...prev.inventory, ...updates } }));
+    }
+  };
+
   const [inputText, setInputText] = useState('');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
-  const [currentList, setCurrentList] = useState<WordEntry[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [viewMode, setViewMode] = useState<'input' | 'list' | 'flashcard' | 'practice' | 'dashboard' | 'pet' | 'shop'>('dashboard');
+  const [viewMode, setViewMode] = useState<'input' | 'list' | 'flashcard' | 'practice' | 'dashboard' | 'pet' | 'shop' | 'challenge' | 'quiz'>('dashboard');
   const [flashcardIndex, setFlashcardIndex] = useState(0);
   const [showFlashcardBack, setShowFlashcardBack] = useState(false);
   const [practiceInput, setPracticeInput] = useState('');
   const [practiceFeedback, setPracticeFeedback] = useState<'correct' | 'wrong' | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isSoundEnabled, setIsSoundEnabled] = useState(() => {
+    const saved = localStorage.getItem('moemoe_sound');
+    return saved === null ? true : saved === 'true';
+  });
   
-  // Gamification State
-  const [points, setPoints] = useState(0);
-  const [pet, setPet] = useState<PetState>({
-    isAdopted: false,
-    type: 'none',
-    stage: 'egg',
-    name: '未命名',
-    sunlightCount: 0,
-    foodCount: 0,
-    waterCount: 0,
-    grassCount: 0,
-    fruitCount: 0,
-    level: 1,
-    experience: 0,
-    dailyGoalProgress: 0,
-    lastStudyDate: new Date().toISOString().split('T')[0],
-    speech: null
-  });
-  const [inventory, setInventory] = useState<Inventory>({
-    sunlight: 0,
-    food: 0,
-    water: 0,
-    grass: 0,
-    fruit: 0
-  });
+  // Quiz Mode State
+  const [quizOptions, setQuizOptions] = useState<string[]>([]);
+  const [quizFeedback, setQuizFeedback] = useState<'correct' | 'wrong' | null>(null);
+  const [selectedOption, setSelectedOption] = useState<string | null>(null);
+
+  // Challenge Mode State
+  const [challengeStreak, setChallengeStreak] = useState(0);
+  const [challengeWord, setChallengeWord] = useState<WordEntry | null>(null);
+  const [challengeType, setChallengeType] = useState<'word' | 'sentence'>('word');
+  const [challengeFeedback, setChallengeFeedback] = useState<'correct' | 'wrong' | null>(null);
+  const [challengeInput, setChallengeInput] = useState('');
 
   // Recording State
   const [isRecording, setIsRecording] = useState(false);
@@ -611,77 +952,169 @@ export default function App() {
   const audioChunksRef = useRef<Blob[]>([]);
 
   const stats: StudyStats = {
-    total: currentList.length,
-    mastered: currentList.filter(w => w.isMastered).length,
-    unmastered: currentList.filter(w => !w.isMastered).length
+    total: activeChild.words.length,
+    mastered: activeChild.words.filter(w => w.isMastered).length,
+    unmastered: activeChild.words.filter(w => !w.isMastered).length
   };
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load data from localStorage on mount
-  useEffect(() => {
-    const savedWords = localStorage.getItem('moemoe_words');
-    if (savedWords) {
-      try {
-        const parsed = JSON.parse(savedWords);
-        setCurrentList(parsed);
-      } catch (e) {
-        console.error("Failed to load saved words", e);
-      }
-    }
-
-    const savedPoints = localStorage.getItem('moemoe_points');
-    if (savedPoints) setPoints(parseInt(savedPoints));
-
-    const savedPet = localStorage.getItem('moemoe_pet');
-    if (savedPet) setPet(JSON.parse(savedPet));
-
-    const savedInventory = localStorage.getItem('moemoe_inventory');
-    if (savedInventory) setInventory(JSON.parse(savedInventory));
-  }, []);
-
   // Save data to localStorage
   useEffect(() => {
-    if (currentList.length > 0) localStorage.setItem('moemoe_words', JSON.stringify(currentList));
-  }, [currentList]);
+    localStorage.setItem('moemoe_child1', JSON.stringify(child1));
+  }, [child1]);
 
   useEffect(() => {
-    localStorage.setItem('moemoe_points', points.toString());
-  }, [points]);
+    localStorage.setItem('moemoe_child2', JSON.stringify(child2));
+  }, [child2]);
 
   useEffect(() => {
-    localStorage.setItem('moemoe_pet', JSON.stringify(pet));
-  }, [pet]);
+    localStorage.setItem('moemoe_sound', isSoundEnabled.toString());
+  }, [isSoundEnabled]);
 
-  useEffect(() => {
-    localStorage.setItem('moemoe_inventory', JSON.stringify(inventory));
-  }, [inventory]);
+  const encouragements = [
+    "太棒了！你真聪明！✨",
+    "继续加油，你是最棒的！🚀",
+    "哇，这个单词你掌握得真快！👏",
+    "学习让你变得更有魅力！❤️",
+    "每天进步一点点，就是伟大的成就！🌟",
+    "你的努力我全都看在眼里哦！💪",
+    "你是学习小天才吗？太厉害了！🌈",
+    "坚持就是胜利，再来一个！🔥"
+  ];
+
+  const playSound = (type: 'correct' | 'wrong' | 'levelup' | 'click') => {
+    if (!isSoundEnabled) return;
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const oscillator = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+
+      if (type === 'correct') {
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(523.25, audioCtx.currentTime); 
+        oscillator.frequency.exponentialRampToValueAtTime(1046.50, audioCtx.currentTime + 0.1);
+        gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+        oscillator.start();
+        oscillator.stop(audioCtx.currentTime + 0.2);
+      } else if (type === 'wrong') {
+        oscillator.type = 'sawtooth';
+        oscillator.frequency.setValueAtTime(220, audioCtx.currentTime);
+        oscillator.frequency.linearRampToValueAtTime(110, audioCtx.currentTime + 0.2);
+        gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        gainNode.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+        oscillator.start();
+        oscillator.stop(audioCtx.currentTime + 0.3);
+      } else if (type === 'levelup') {
+        oscillator.type = 'square';
+        oscillator.frequency.setValueAtTime(440, audioCtx.currentTime);
+        oscillator.frequency.setValueAtTime(554.37, audioCtx.currentTime + 0.1);
+        oscillator.frequency.setValueAtTime(659.25, audioCtx.currentTime + 0.2);
+        oscillator.frequency.setValueAtTime(880, audioCtx.currentTime + 0.3);
+        gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.5);
+        oscillator.start();
+        oscillator.stop(audioCtx.currentTime + 0.5);
+      } else if (type === 'click') {
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+        gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.05);
+        oscillator.start();
+        oscillator.stop(audioCtx.currentTime + 0.05);
+      }
+    } catch (e) {
+      console.error("Audio error", e);
+    }
+  };
+
+  const getRandomEncouragement = () => encouragements[Math.floor(Math.random() * encouragements.length)];
+
+  const renamePet = () => {
+    const newName = prompt("给你的宠物起个新名字吧：", activeChild.pet.name);
+    if (newName && newName.trim()) {
+      updateActivePet({ name: newName.trim() });
+      playSound('click');
+    }
+  };
+
+  const changePet = (newType: PetState['type']) => {
+    if (activeChild.pet.hasChangedPet) {
+      alert("你已经更换过一次宠物了，不能再换啦！");
+      return;
+    }
+    if (activeChild.points < 50) {
+      alert("更换宠物需要 50 积分哦！");
+      return;
+    }
+    if (confirm(`确定要花费 50 积分更换为 ${newType} 吗？每个账号只能更换一次哦！`)) {
+      updateActiveChild({ points: activeChild.points - 50 });
+      updateActivePet({ type: newType, hasChangedPet: true });
+      playSound('levelup');
+    }
+  };
+
+  const inviteBuddy = () => {
+    if (confirm("确定要为另一位孩子开启宠物陪伴吗？两位孩子可以一起学习比拼哦！")) {
+      setActiveChildId(activeChildId === 'child1' ? 'child2' : 'child1');
+      playSound('levelup');
+    }
+  };
 
   const addPoints = (amount: number) => {
-    setPoints(prev => prev + amount);
+    updateActiveChild({ points: activeChild.points + amount });
   };
 
   const completeStudyAction = (pointsAmount: number) => {
     addPoints(pointsAmount);
-    setPet(prev => {
-      const newProgress = prev.dailyGoalProgress + 1;
-      let speech = prev.speech;
-      if (newProgress === DAILY_GOAL) {
-        speech = "太棒了！今天的学习目标完成啦！奖励你一个大大的拥抱！";
-      } else if (newProgress < DAILY_GOAL) {
-        speech = `加油！再完成 ${DAILY_GOAL - newProgress} 个练习就达到今天的目标了！`;
+    playSound('correct');
+    const newProgress = activeChild.pet.dailyGoalProgress + 1;
+    const newExp = activeChild.pet.experience + 5;
+    let experience = newExp;
+    let level = activeChild.pet.level;
+    let stage = activeChild.pet.stage;
+    let speech = getRandomEncouragement();
+
+    if (experience >= 100) {
+      level += 1;
+      experience -= 100;
+      speech = `太棒了！我升级到 Lv.${level} 啦！感觉充满了力量！✨`;
+      playSound('levelup');
+      
+      // Evolution logic
+      if (level >= 5 && stage === 'baby') {
+        stage = 'adult';
+        speech = "哇！我长大了！现在我是大可爱啦！🦁";
       }
-      return { ...prev, dailyGoalProgress: newProgress, speech };
+    }
+
+    if (newProgress === DAILY_GOAL) {
+      speech = "太棒了！今天的学习目标完成啦！奖励你一个大大的拥抱！";
+    }
+
+    updateActivePet({ 
+      dailyGoalProgress: newProgress, 
+      speech,
+      level,
+      experience,
+      stage,
+      learningPower: level * 100 + experience
     });
+    
     // Clear speech after 5 seconds
     setTimeout(() => {
-      setPet(prev => ({ ...prev, speech: null }));
+      updateActivePet({ speech: null });
     }, 5000);
   };
 
   const petThePet = () => {
-    if (!pet.isAdopted) return;
+    if (!activeChild.pet.isAdopted) return;
+    playSound('click');
     const messages = [
       "摸摸头，真舒服呀！",
       "主人最棒了，我们一起加油学习吧！",
@@ -691,32 +1124,30 @@ export default function App() {
     ];
     const randomMessage = messages[Math.floor(Math.random() * messages.length)];
     
-    setPet(prev => ({ 
-      ...prev, 
+    updateActivePet({ 
       lastReaction: 'happy',
       speech: randomMessage 
-    }));
+    });
     
     setTimeout(() => {
-      setPet(prev => ({ ...prev, lastReaction: null, speech: null }));
+      updateActivePet({ lastReaction: null, speech: null });
     }, 3000);
   };
 
   // Daily reset logic
   useEffect(() => {
     const today = new Date().toISOString().split('T')[0];
-    if (pet.lastStudyDate !== today) {
-      setPet(prev => ({
-        ...prev,
+    if (activeChild.pet.lastStudyDate !== today) {
+      updateActivePet({
         dailyGoalProgress: 0,
         lastStudyDate: today,
         speech: "新的一天开始啦！今天要也要加油学习哦！"
-      }));
+      });
       setTimeout(() => {
-        setPet(prev => ({ ...prev, speech: null }));
+        updateActivePet({ speech: null });
       }, 5000);
     }
-  }, [pet.lastStudyDate]);
+  }, [activeChild.pet.lastStudyDate]);
 
   const startRecording = async (target: string) => {
     try {
@@ -741,7 +1172,7 @@ export default function App() {
         reader.onloadend = async () => {
           const base64Audio = (reader.result as string).split(',')[1];
           setIsLoading(true);
-          const result = await evaluatePronunciation(target, base64Audio);
+          const result = await evaluatePronunciation(target, base64Audio, 'english');
           setEvaluationResult(result);
           setIsLoading(false);
           
@@ -784,75 +1215,86 @@ export default function App() {
   };
 
   const buyItem = (item: keyof Inventory, cost: number) => {
-    if (points >= cost) {
-      setPoints(prev => prev - cost);
-      setInventory(prev => ({ ...prev, [item]: prev[item] + 1 }));
+    if (activeChild.points >= cost) {
+      updateActiveChild({ points: activeChild.points - cost });
+      updateActiveInventory({ [item]: activeChild.inventory[item] + 1 });
+      playSound('click');
     } else {
       alert("积分不足哦，快去学习赚取积分吧！");
+      playSound('wrong');
     }
   };
 
   const useItem = (item: keyof Inventory) => {
-    if (inventory[item] > 0) {
-      setInventory(prev => ({ ...prev, [item]: prev[item] - 1 }));
+    if (activeChild.inventory[item] > 0) {
+      updateActiveInventory({ [item]: activeChild.inventory[item] - 1 });
+      playSound('click');
       
       const triggerReaction = (reaction: PetState['lastReaction']) => {
-        setPet(prev => ({ ...prev, lastReaction: reaction }));
+        updateActivePet({ lastReaction: reaction });
         setTimeout(() => {
-          setPet(prev => ({ ...prev, lastReaction: null }));
+          updateActivePet({ lastReaction: null });
         }, 2000);
       };
 
       if (item === 'sunlight') {
-        setPet(prev => {
-          const newSunlight = prev.sunlightCount + 1;
-          let newStage = prev.stage;
-          if (newSunlight >= 3 && prev.stage === 'egg') {
-            newStage = 'baby';
-            triggerReaction('hatching');
-            alert("哇！宠物蛋孵化啦！变成小可爱了！");
-          } else {
-            triggerReaction('happy');
-          }
-          return { ...prev, sunlightCount: newSunlight, stage: newStage };
-        });
+        const newSunlight = activeChild.pet.sunlightCount + 1;
+        let newStage = activeChild.pet.stage;
+        let speech = "戴上墨镜，晒太阳，吸收钙，好舒服！😎☀️";
+        if (newSunlight >= 3 && activeChild.pet.stage === 'egg') {
+          newStage = 'baby';
+          triggerReaction('hatching');
+          speech = "哇！我出生啦！主人你好呀！🐣";
+          playSound('levelup');
+        } else {
+          triggerReaction('sunbathing');
+        }
+        updateActivePet({ sunlightCount: newSunlight, stage: newStage, speech, learningPower: (activeChild.pet.level * 100) + activeChild.pet.experience + 2 });
       } else if (item === 'food' || item === 'grass' || item === 'fruit') {
         triggerReaction('eating');
-        setPet(prev => {
-          const expGain = item === 'food' ? 20 : item === 'grass' ? 10 : 30;
-          const newExperience = prev.experience + expGain;
-          let newLevel = prev.level;
-          let newStage = prev.stage;
-          if (newExperience >= 100) {
-            newLevel += 1;
-            if (newLevel >= 5 && prev.stage === 'baby') {
-              newStage = 'adult';
-              alert("恭喜！你的宠物长大了！");
-            }
-            return { ...prev, level: newLevel, experience: 0, stage: newStage };
+        const expGain = item === 'food' ? 20 : item === 'grass' ? 10 : 30;
+        const newExperience = activeChild.pet.experience + expGain;
+        let newLevel = activeChild.pet.level;
+        let newStage = activeChild.pet.stage;
+        let speech = item === 'food' ? "真好吃！谢谢主人！😋" : item === 'grass' ? "脆脆的，味道不错！🌿" : "太甜了！我最喜欢吃水果了！🍎";
+        
+        if (newExperience >= 100) {
+          newLevel += 1;
+          speech = `升级啦！我现在是 Lv.${newLevel} 啦！✨`;
+          playSound('levelup');
+          if (newLevel >= 5 && activeChild.pet.stage === 'baby') {
+            newStage = 'adult';
+            speech = "哇！我长大了！现在我是大可爱啦！🦁";
           }
-          return { ...prev, experience: newExperience };
-        });
+          updateActivePet({ level: newLevel, experience: 0, stage: newStage, speech, learningPower: newLevel * 100 });
+        } else {
+          updateActivePet({ experience: newExperience, speech, learningPower: activeChild.pet.level * 100 + newExperience });
+        }
       } else if (item === 'water') {
         triggerReaction('drinking');
-        setPet(prev => ({ ...prev, waterCount: prev.waterCount + 1 }));
-        alert("宠物喝了水，感觉很有精神！");
+        updateActivePet({ 
+          waterCount: activeChild.pet.waterCount + 1, 
+          speech: "咕嘟咕嘟...解渴了！💧",
+          learningPower: (activeChild.pet.level * 100) + activeChild.pet.experience + 1
+        });
       }
     }
   };
 
   const adoptPet = (type: PetState['type'], name: string) => {
-    if (points >= 10) {
-      setPoints(prev => prev - 10);
-      setPet(prev => ({
-        ...prev,
+    if (activeChild.points >= 10) {
+      updateActiveChild({ points: activeChild.points - 10 });
+      playSound('levelup');
+      updateActivePet({
         isAdopted: true,
         type,
         name,
-        stage: 'egg'
-      }));
+        stage: 'egg',
+        learningPower: 100
+      });
     } else {
       alert("积分不足，领养宠物需要 10 积分哦！快去学习吧！");
+      playSound('wrong');
     }
   };
 
@@ -915,7 +1357,9 @@ export default function App() {
   };
 
   const toggleMastery = (id: string) => {
-    setCurrentList(prev => prev.map(w => w.id === id ? { ...w, isMastered: !w.isMastered } : w));
+    updateActiveChild({
+      words: activeChild.words.map(w => w.id === id ? { ...w, isMastered: !w.isMastered } : w)
+    });
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -930,47 +1374,56 @@ export default function App() {
   };
 
   const handleGenerate = async () => {
+    if (!selectedImage && !inputText.trim()) {
+      alert("请先拍照或输入单词哦！");
+      return;
+    }
+    
     setIsLoading(true);
     try {
       let wordsToProcess: string[] = [];
       
       if (selectedImage) {
-        const base64 = selectedImage.split(',')[1];
-        wordsToProcess = await extractWordsFromImage(base64);
+        wordsToProcess = await extractWordsFromImage(selectedImage, activeChild.grade);
       } else if (inputText.trim()) {
         wordsToProcess = inputText.split(/[,\s\n]+/).filter(w => w.trim().length > 0);
       }
 
       if (wordsToProcess.length > 0) {
-        const details = await generateWordDetails(wordsToProcess);
-        setCurrentList(prev => {
-          const existingWords = new Set(prev.map(w => w.word.toLowerCase()));
-          const newWords = details.filter(d => !existingWords.has(d.word.toLowerCase()));
-          return [...prev, ...newWords];
+        const details = await generateWordDetails(wordsToProcess, activeChild.grade);
+        updateActiveChild({
+          words: [
+            ...activeChild.words,
+            ...details.filter(d => !activeChild.words.some(w => w.word.toLowerCase() === d.word.toLowerCase()))
+          ]
         });
         setViewMode('list');
         setInputText('');
         setSelectedImage(null);
+      } else {
+        alert("未能从图片中识别到单词，请尝试换个角度拍照或手动输入。");
       }
     } catch (error) {
-      alert("生成失败，请稍后再试。");
+      console.error("Generate Error:", error);
+      alert("生成失败，可能是网络问题或图片不够清晰，请稍后再试。");
     } finally {
       setIsLoading(false);
     }
   };
 
   const handlePracticeSubmit = () => {
-    const currentWord = currentList.filter(w => !w.isMastered)[flashcardIndex];
+    const currentWord = activeChild.words.filter(w => !w.isMastered)[flashcardIndex];
     if (practiceInput.trim().toLowerCase() === currentWord.word.toLowerCase()) {
       setPracticeFeedback('correct');
       completeStudyAction(5); // Correct spelling awards 5 points
     } else {
       setPracticeFeedback('wrong');
+      playSound('wrong');
     }
   };
 
   const nextPractice = () => {
-    const unmastered = currentList.filter(w => !w.isMastered);
+    const unmastered = activeChild.words.filter(w => !w.isMastered);
     if (flashcardIndex < unmastered.length - 1) {
       setFlashcardIndex(prev => prev + 1);
       setPracticeInput('');
@@ -979,6 +1432,105 @@ export default function App() {
       // Finished practice
       setViewMode('dashboard');
     }
+  };
+
+  const startChallenge = () => {
+    if (activeChild.words.length === 0) {
+      alert("请先添加一些单词吧！");
+      return;
+    }
+    const randomWord = activeChild.words[Math.floor(Math.random() * activeChild.words.length)];
+    const type = Math.random() > 0.5 ? 'sentence' : 'word';
+    setChallengeWord(randomWord);
+    setChallengeType(type);
+    setChallengeInput('');
+    setChallengeFeedback(null);
+    setViewMode('challenge');
+  };
+
+  const handleChallengeSubmit = () => {
+    if (!challengeWord) return;
+    const target = challengeType === 'word' ? challengeWord.word : challengeWord.example;
+    const cleanInput = challengeInput.trim().toLowerCase().replace(/[.?!,]/g, '');
+    const cleanTarget = target.toLowerCase().replace(/[.?!,]/g, '');
+
+      if (cleanInput === cleanTarget) {
+        setChallengeFeedback('correct');
+        setChallengeStreak(prev => prev + 1);
+        const basePoints = challengeType === 'sentence' ? 20 : 10;
+        completeStudyAction(basePoints + Math.min(challengeStreak * 2, 20)); // Bonus points for streak
+        
+        // Pet reaction
+        updateActivePet({
+          speech: challengeType === 'sentence' ? `哇！句子都写对了！奖励翻倍！连击 x${challengeStreak + 1}！` : `太棒了！连击 x${challengeStreak + 1}！继续挑战吧！`
+        });
+      } else {
+        setChallengeFeedback('wrong');
+        playSound('wrong');
+        setChallengeStreak(0);
+        updateActivePet({
+          speech: "哎呀，没关系，再试一次！"
+        });
+      }
+  };
+
+  const nextChallenge = () => {
+    const randomWord = activeChild.words[Math.floor(Math.random() * activeChild.words.length)];
+    const type = Math.random() > 0.5 ? 'sentence' : 'word';
+    setChallengeWord(randomWord);
+    setChallengeType(type);
+    setChallengeInput('');
+    setChallengeFeedback(null);
+  };
+
+  const startQuiz = () => {
+    if (activeChild.words.length < 4) {
+      alert("至少需要 4 个单词才能开始选择题练习哦！");
+      return;
+    }
+    const unmastered = activeChild.words.filter(w => !w.isMastered);
+    const target = unmastered.length > 0 ? unmastered[0] : activeChild.words[Math.floor(Math.random() * activeChild.words.length)];
+    
+    // Generate options
+    const otherWords = activeChild.words.filter(w => w.id !== target.id);
+    const shuffledOthers = [...otherWords].sort(() => 0.5 - Math.random());
+    const options = [target.word, ...shuffledOthers.slice(0, 3).map(w => w.word)].sort(() => 0.5 - Math.random());
+    
+    setFlashcardIndex(activeChild.words.indexOf(target));
+    setQuizOptions(options);
+    setQuizFeedback(null);
+    setSelectedOption(null);
+    setViewMode('quiz');
+  };
+
+  const handleQuizSubmit = (option: string) => {
+    const target = activeChild.words[flashcardIndex];
+    setSelectedOption(option);
+    if (option === target.word) {
+      setQuizFeedback('correct');
+      completeStudyAction(3);
+    } else {
+      setQuizFeedback('wrong');
+      playSound('wrong');
+    }
+  };
+
+  const nextQuiz = () => {
+    const unmastered = activeChild.words.filter(w => !w.isMastered);
+    if (unmastered.length === 0) {
+      setViewMode('dashboard');
+      return;
+    }
+    
+    const target = unmastered[Math.floor(Math.random() * unmastered.length)];
+    const otherWords = activeChild.words.filter(w => w.id !== target.id);
+    const shuffledOthers = [...otherWords].sort(() => 0.5 - Math.random());
+    const options = [target.word, ...shuffledOthers.slice(0, 3).map(w => w.word)].sort(() => 0.5 - Math.random());
+    
+    setFlashcardIndex(activeChild.words.indexOf(target));
+    setQuizOptions(options);
+    setQuizFeedback(null);
+    setSelectedOption(null);
   };
 
   return (
@@ -996,7 +1548,38 @@ export default function App() {
 
       <div className="max-w-4xl mx-auto">
         {/* Header */}
-        <header className="text-center mb-12">
+        <header className="text-center mb-12 relative">
+          <div className="absolute top-0 right-0 flex gap-2">
+            {/* Profile Switcher */}
+            <div className="flex bg-pink-50 rounded-2xl p-1 mr-2">
+              <button 
+                onClick={() => setActiveChildId('child1')}
+                className={cn(
+                  "px-4 py-2 rounded-xl text-sm font-black transition-all",
+                  activeChildId === 'child1' ? "bg-white text-pink-500 shadow-md" : "text-gray-400 hover:text-gray-600"
+                )}
+              >
+                2年级
+              </button>
+              <button 
+                onClick={() => setActiveChildId('child2')}
+                className={cn(
+                  "px-4 py-2 rounded-xl text-sm font-black transition-all",
+                  activeChildId === 'child2' ? "bg-white text-pink-500 shadow-md" : "text-gray-400 hover:text-gray-600"
+                )}
+              >
+                4年级
+              </button>
+            </div>
+
+            <Button 
+              variant="ghost" 
+              onClick={() => setIsSoundEnabled(!isSoundEnabled)}
+              className="p-2"
+            >
+              {isSoundEnabled ? <Volume2 className="w-6 h-6" /> : <MicOff className="w-6 h-6" />}
+            </Button>
+          </div>
           <motion.div 
             initial={{ scale: 0.8, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
@@ -1010,7 +1593,7 @@ export default function App() {
               <Sparkles className="text-pink-500 w-8 h-8" />
             </div>
             <p className="text-pink-400 font-medium text-lg">
-              四年级英语（新版人教版）学习好帮手 ✨
+              {activeChild.grade}年级学习好帮手 ✨
             </p>
           </motion.div>
         </header>
@@ -1032,20 +1615,18 @@ export default function App() {
             <BookOpen className="w-4 h-4 md:w-5 md:h-5" /> 列表
           </Button>
           <Button 
-            variant={viewMode === 'practice' ? 'secondary' : 'ghost'} 
-            onClick={() => {
-              if (stats.unmastered === 0) {
-                alert("太棒了！你已经掌握了所有单词，快去添加新单词吧！");
-                return;
-              }
-              setViewMode('practice');
-              setFlashcardIndex(0);
-              setPracticeInput('');
-              setPracticeFeedback(null);
-            }}
+            variant={viewMode === 'challenge' ? 'secondary' : 'ghost'} 
+            onClick={startChallenge}
+            className="px-4 md:px-6 py-2 text-sm md:text-base border-2 border-yellow-400 text-yellow-600 hover:bg-yellow-50"
+          >
+            <Trophy className="w-4 h-4 md:w-5 md:h-5" /> 挑战模式
+          </Button>
+          <Button 
+            variant={viewMode === 'quiz' ? 'secondary' : 'ghost'} 
+            onClick={startQuiz}
             className="px-4 md:px-6 py-2 text-sm md:text-base"
           >
-            <PenTool className="w-4 h-4 md:w-5 md:h-5" /> 默写
+            <PenTool className="w-4 h-4 md:w-5 md:h-5" /> 选择题
           </Button>
           <Button 
             variant={viewMode === 'pet' ? 'secondary' : 'ghost'} 
@@ -1074,12 +1655,143 @@ export default function App() {
         <div className="flex justify-center mb-6">
           <div className="bg-white px-6 py-2 rounded-full border-4 border-yellow-100 shadow-sm flex items-center gap-2">
             <Star className="text-yellow-400" fill="currentColor" size={20} />
-            <span className="font-black text-yellow-600 text-xl">{points} 积分</span>
+            <span className="font-black text-yellow-600 text-xl">{activeChild.points} 积分</span>
           </div>
         </div>
 
         <main>
           <AnimatePresence mode="wait">
+            {/* Challenge Mode View */}
+            {viewMode === 'challenge' && challengeWord && (
+              <motion.div
+                key="challenge"
+                initial={{ x: 50, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: -50, opacity: 0 }}
+                className="flex flex-col items-center"
+              >
+                <Card className="w-full max-w-2xl p-8 md:p-12 text-center relative overflow-hidden">
+                  {/* Streak Badge */}
+                  <div className="absolute top-4 right-4 bg-orange-500 text-white px-4 py-2 rounded-full font-black shadow-lg animate-bounce">
+                    连击 x{challengeStreak}
+                  </div>
+
+                  <div className="mb-8">
+                    <span className="text-sm font-bold text-pink-400 uppercase tracking-widest">
+                      {challengeType === 'word' ? '单词挑战' : '句子挑战 (双倍积分!)'}
+                    </span>
+                    <h2 className="text-4xl font-black text-gray-800 mt-2">
+                      {challengeType === 'word' ? challengeWord.meaning : challengeWord.exampleTranslation}
+                    </h2>
+                    {challengeType === 'sentence' && (
+                      <div className="mt-4 flex justify-center gap-2">
+                        <button onClick={() => speak(challengeWord.example)} className="text-blue-400 hover:text-blue-600 flex items-center gap-1 font-bold">
+                          <Volume2 size={18} /> 听句子
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-6">
+                    <div className="relative">
+                      {challengeType === 'word' ? (
+                        <input
+                          type="text"
+                          value={challengeInput}
+                          onChange={(e) => setChallengeInput(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && !challengeFeedback && handleChallengeSubmit()}
+                          placeholder="输入英文单词..."
+                          disabled={!!challengeFeedback}
+                          className={cn(
+                            "w-full px-8 py-6 rounded-3xl text-3xl font-bold text-center border-4 outline-none transition-all",
+                            challengeFeedback === 'correct' ? "border-green-400 bg-green-50 text-green-600" :
+                            challengeFeedback === 'wrong' ? "border-red-400 bg-red-50 text-red-600 animate-shake" :
+                            "border-pink-100 focus:border-pink-300 bg-pink-50/30"
+                          )}
+                          autoFocus
+                        />
+                      ) : (
+                        <textarea
+                          value={challengeInput}
+                          onChange={(e) => setChallengeInput(e.target.value)}
+                          placeholder="输入完整的英文句子..."
+                          disabled={!!challengeFeedback}
+                          rows={3}
+                          className={cn(
+                            "w-full px-8 py-6 rounded-3xl text-2xl font-bold text-center border-4 outline-none transition-all resize-none",
+                            challengeFeedback === 'correct' ? "border-green-400 bg-green-50 text-green-600" :
+                            challengeFeedback === 'wrong' ? "border-red-400 bg-red-50 text-red-600 animate-shake" :
+                            "border-pink-100 focus:border-pink-300 bg-pink-50/30"
+                          )}
+                          autoFocus
+                        />
+                      )}
+                      {challengeFeedback === 'correct' && (
+                        <motion.div 
+                          initial={{ scale: 0 }}
+                          animate={{ scale: 1.2 }}
+                          className="absolute -right-4 -top-4 bg-green-500 text-white p-3 rounded-full shadow-lg z-10"
+                        >
+                          <Check size={32} />
+                        </motion.div>
+                      )}
+                    </div>
+
+                    {!challengeFeedback ? (
+                      <Button 
+                        onClick={handleChallengeSubmit} 
+                        className="w-full py-6 text-2xl"
+                        disabled={!challengeInput.trim()}
+                      >
+                        提交答案
+                      </Button>
+                    ) : (
+                      <div className="space-y-4">
+                        <div className="p-6 bg-gray-50 rounded-3xl border-2 border-dashed border-gray-200">
+                          <p className="text-sm text-gray-400 mb-1">正确答案是：</p>
+                          <p className="text-2xl md:text-3xl font-black text-gray-800">
+                            {challengeType === 'word' ? challengeWord.word : challengeWord.example}
+                          </p>
+                          <div className="flex justify-center gap-4 mt-4">
+                            <Button variant="ghost" onClick={() => speak(challengeType === 'word' ? challengeWord.word : challengeWord.example)}>
+                              <Volume2 /> 听发音
+                            </Button>
+                          </div>
+                        </div>
+                        
+                        <Button 
+                          onClick={nextChallenge} 
+                          className="w-full py-6 text-2xl bg-yellow-400 hover:bg-yellow-500"
+                        >
+                          {challengeFeedback === 'correct' ? "继续挑战！" : "再试一个"} <ArrowRight className="ml-2" />
+                        </Button>
+                        
+                        <Button 
+                          variant="ghost" 
+                          onClick={() => setViewMode('dashboard')}
+                          className="w-full"
+                        >
+                          结束挑战
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Pet Encouragement */}
+                  <div className="mt-12 flex items-center justify-center gap-4 p-4 bg-pink-50 rounded-2xl border-2 border-pink-100">
+                    <div className="w-16 h-16">
+                      <PetVisual pet={pet} scale={0.3} />
+                    </div>
+                    <p className="text-pink-600 font-bold italic">
+                      {challengeFeedback === 'correct' ? "你太棒了！积分哗哗地涨！" : 
+                       challengeFeedback === 'wrong' ? "没关系，失败是成功之母！" : 
+                       "加油！看看你能连击多少次？"}
+                    </p>
+                  </div>
+                </Card>
+              </motion.div>
+            )}
+
             {/* Dashboard View */}
             {viewMode === 'dashboard' && (
               <motion.div
@@ -1243,12 +1955,25 @@ export default function App() {
                     <h2 className="text-3xl font-black text-gray-800 mb-4">领养你的小宠物</h2>
                     <p className="text-gray-500 mb-8">领养一只可爱的小宠物陪你一起学习吧！领养需要消耗 <span className="text-pink-500 font-bold">10 积分</span>。</p>
                     
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
+                    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4 mb-10 max-h-[400px] overflow-y-auto p-2">
                       {[
                         { type: 'cat', name: '小猫咪', icon: <Heart size={32} fill="currentColor" />, color: 'bg-orange-100 text-orange-500' },
                         { type: 'dog', name: '小狗狗', icon: <Star size={32} fill="currentColor" />, color: 'bg-blue-100 text-blue-500' },
                         { type: 'rabbit', name: '小兔子', icon: <Cloud size={32} fill="currentColor" />, color: 'bg-pink-100 text-pink-500' },
                         { type: 'dragon', name: '小恐龙', icon: <Sparkles size={32} fill="currentColor" />, color: 'bg-green-100 text-green-500' },
+                        { type: 'pig', name: '小猪猪', icon: <Heart size={32} fill="currentColor" />, color: 'bg-pink-100 text-pink-400' },
+                        { type: 'elephant', name: '小象', icon: <Cloud size={32} fill="currentColor" />, color: 'bg-blue-100 text-blue-400' },
+                        { type: 'panda', name: '小熊猫', icon: <Circle size={32} fill="currentColor" />, color: 'bg-gray-100 text-gray-800' },
+                        { type: 'penguin', name: '小企鹅', icon: <Star size={32} fill="currentColor" />, color: 'bg-slate-200 text-slate-800' },
+                        { type: 'frog', name: '小青蛙', icon: <Circle size={32} fill="currentColor" />, color: 'bg-emerald-100 text-emerald-500' },
+                        { type: 'fox', name: '小狐狸', icon: <Sparkles size={32} fill="currentColor" />, color: 'bg-orange-100 text-orange-600' },
+                        { type: 'monkey', name: '小猴子', icon: <Circle size={32} fill="currentColor" />, color: 'bg-amber-100 text-amber-700' },
+                        { type: 'koala', name: '考拉', icon: <Circle size={32} fill="currentColor" />, color: 'bg-slate-100 text-slate-500' },
+                        { type: 'tiger', name: '小老虎', icon: <Star size={32} fill="currentColor" />, color: 'bg-orange-100 text-orange-500' },
+                        { type: 'giraffe', name: '长颈鹿', icon: <Star size={32} fill="currentColor" />, color: 'bg-yellow-100 text-yellow-600' },
+                        { type: 'bear', name: '小熊', icon: <Circle size={32} fill="currentColor" />, color: 'bg-amber-100 text-amber-800' },
+                        { type: 'chick', name: '小鸡', icon: <Sun size={32} fill="currentColor" />, color: 'bg-yellow-100 text-yellow-500' },
+                        { type: 'bee', name: '小蜜蜂', icon: <Sparkles size={32} fill="currentColor" />, color: 'bg-yellow-100 text-yellow-600' },
                       ].map((p) => (
                         <button
                           key={p.type}
@@ -1265,7 +1990,7 @@ export default function App() {
                     </div>
 
                     <div className="flex items-center justify-center gap-2 text-yellow-600 font-bold">
-                      <Star fill="currentColor" size={20} /> 当前积分: {points}
+                      <Star fill="currentColor" size={20} /> 当前积分: {activeChild.points}
                     </div>
                   </Card>
                 ) : (
@@ -1277,10 +2002,7 @@ export default function App() {
                     <div className="flex items-center justify-center gap-3 mb-2">
                       <h2 className="text-3xl font-black text-gray-800">{pet.name}</h2>
                       <button 
-                        onClick={() => {
-                          const newName = prompt("给你的宠物起个新名字吧：", pet.name);
-                          if (newName) setPet(prev => ({ ...prev, name: newName }));
-                        }}
+                        onClick={renamePet}
                         className="text-gray-400 hover:text-pink-500 transition-colors"
                       >
                         <PenTool size={18} />
@@ -1292,7 +2014,7 @@ export default function App() {
                        "它已经长成大可爱了，继续学习让它更强大！"}
                     </p>
 
-                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8">
                       <div className="bg-white p-4 rounded-3xl border-4 border-yellow-100 shadow-sm">
                         <div className="flex items-center justify-between mb-2">
                           <Sun className="text-yellow-500" size={20} />
@@ -1364,6 +2086,72 @@ export default function App() {
                         </Button>
                       </div>
                     </div>
+
+                    {/* Change Pet Button */}
+                    {!pet.hasChangedPet && (
+                      <div className="mt-4">
+                        <Button 
+                          variant="ghost" 
+                          onClick={() => {
+                            const types: PetState['type'][] = ['panda', 'koala', 'fox', 'tiger', 'penguin', 'dragon', 'cat', 'dog', 'rabbit'];
+                            const randomType = types[Math.floor(Math.random() * types.length)];
+                            changePet(randomType);
+                          }}
+                          className="text-xs text-gray-400 underline mx-auto"
+                        >
+                          更换宠物 (50 积分，限一次)
+                        </Button>
+                      </div>
+                    )}
+
+                    {/* Buddy Competition Section */}
+                    {buddy ? (
+                      <div className="mt-12 p-8 bg-gradient-to-br from-purple-50 to-blue-50 rounded-[3rem] border-4 border-purple-100 shadow-inner">
+                        <div className="flex items-center justify-center gap-4 mb-8">
+                          <Trophy className="text-yellow-500" size={32} />
+                          <h3 className="text-2xl font-black text-purple-700">学习力大比拼</h3>
+                        </div>
+                        <div className="flex flex-col md:flex-row items-center justify-around gap-8">
+                          {/* My Pet */}
+                          <div className="flex flex-col items-center gap-4">
+                            <div className="w-32 h-32 bg-white rounded-3xl flex items-center justify-center shadow-lg">
+                              <PetVisual pet={pet} scale={0.6} />
+                            </div>
+                            <div className="text-center">
+                              <p className="font-black text-gray-700">{pet.name}</p>
+                              <p className="text-sm text-gray-500">学习力: {pet.learningPower}</p>
+                            </div>
+                          </div>
+
+                          {/* VS */}
+                          <div className="text-4xl font-black text-purple-300 italic">VS</div>
+
+                          {/* Buddy Pet */}
+                          <div className="flex flex-col items-center gap-4">
+                            <div className="w-32 h-32 bg-white rounded-3xl flex items-center justify-center shadow-lg">
+                              <PetVisual pet={buddy} scale={0.6} />
+                            </div>
+                            <div className="text-center">
+                              <p className="font-black text-gray-700">{buddy.name}</p>
+                              <p className="text-sm text-gray-500">学习力: {buddy.learningPower}</p>
+                            </div>
+                          </div>
+                        </div>
+                        
+                        <div className="mt-8 text-center">
+                          <div className="inline-block px-6 py-2 bg-white rounded-full border-2 border-purple-200 text-purple-600 font-bold">
+                            {pet.learningPower >= buddy.learningPower ? "🎉 你暂时领先哦！继续保持！" : "💪 小伙伴超前啦！快去背单词追上它！"}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-12 p-8 bg-gray-50 rounded-[3rem] border-4 border-dashed border-gray-200 text-center">
+                        <p className="text-gray-500 mb-4 font-bold">一个人学习太孤单？邀请小伙伴一起来比拼吧！</p>
+                        <Button variant="secondary" onClick={inviteBuddy} className="bg-purple-500 hover:bg-purple-600 mx-auto">
+                          邀请小伙伴 (免费)
+                        </Button>
+                      </div>
+                    )}
                   </Card>
                 )}
               </motion.div>
@@ -1610,7 +2398,7 @@ export default function App() {
                   )}
                 </AnimatePresence>
 
-                {currentList.map((entry, idx) => (
+                {activeChild.words.map((entry, idx) => (
                   <motion.div
                     key={entry.id || entry.word}
                     initial={{ x: -20, opacity: 0 }}
@@ -1696,7 +2484,9 @@ export default function App() {
                           <button 
                             onClick={() => {
                               if (confirm("确定要删除这个单词吗？")) {
-                                setCurrentList(prev => prev.filter(w => w.id !== entry.id));
+                                updateActiveChild({
+                                  words: activeChild.words.filter(w => w.id !== entry.id)
+                                });
                               }
                             }}
                             className="p-2 text-gray-300 hover:text-red-400 transition-colors"
@@ -1717,120 +2507,77 @@ export default function App() {
               </motion.div>
             )}
 
-            {/* Practice View */}
-            {viewMode === 'practice' && (
+            {/* Quiz View */}
+            {viewMode === 'quiz' && (
               <motion.div
-                key="practice"
+                key="quiz"
                 initial={{ scale: 0.9, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 exit={{ scale: 0.9, opacity: 0 }}
                 className="flex flex-col items-center"
               >
-                {currentList.filter(w => !w.isMastered).length > 0 ? (
-                  <div className="w-full max-w-2xl">
-                    <Card className="p-8 md:p-12 text-center">
-                      <div className="mb-8">
-                        <span className="bg-pink-100 text-pink-500 px-4 py-1 rounded-full text-sm font-bold uppercase tracking-widest">
-                          默写练习
-                        </span>
-                        <h2 className="text-4xl font-black text-gray-800 mt-4 mb-2">
-                          {currentList.filter(w => !w.isMastered)[flashcardIndex].meaning}
-                        </h2>
-                        <div className="flex justify-center gap-4">
-                          <button 
-                            onClick={() => speak(currentList.filter(w => !w.isMastered)[flashcardIndex].word)}
-                            disabled={isSpeaking}
-                            className="flex items-center gap-2 text-pink-400 hover:text-pink-600 font-bold disabled:opacity-50"
-                          >
-                            {isSpeaking ? <Loader2 size={20} className="animate-spin" /> : <Volume2 size={20} />} 听发音
-                          </button>
-                          <button 
-                            onClick={() => speak(currentList.filter(w => !w.isMastered)[flashcardIndex].example)}
-                            disabled={isSpeaking}
-                            className="flex items-center gap-2 text-blue-400 hover:text-blue-600 font-bold disabled:opacity-50"
-                          >
-                            {isSpeaking ? <Loader2 size={20} className="animate-spin" /> : <PlayCircle size={20} />} 听例句
-                          </button>
+                <Card className="w-full max-w-2xl p-8 md:p-12 text-center">
+                  <div className="mb-8">
+                    <span className="bg-blue-100 text-blue-500 px-4 py-1 rounded-full text-sm font-bold uppercase tracking-widest">
+                      选择题练习
+                    </span>
+                    <h2 className="text-4xl font-black text-gray-800 mt-4 mb-2">
+                      {activeChild.words[flashcardIndex].meaning}
+                    </h2>
+                    <p className="text-gray-400 italic">“{activeChild.words[flashcardIndex].exampleTranslation}”</p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+                    {quizOptions.map((option, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => !quizFeedback && handleQuizSubmit(option)}
+                        disabled={!!quizFeedback}
+                        className={cn(
+                          "p-6 rounded-3xl text-xl font-bold border-4 transition-all transform active:scale-95",
+                          selectedOption === option ? (
+                            quizFeedback === 'correct' ? "border-green-400 bg-green-50 text-green-600" : "border-red-400 bg-red-50 text-red-600"
+                          ) : (
+                            quizFeedback === 'correct' && option === words[flashcardIndex].word ? "border-green-400 bg-green-50 text-green-600" : "border-pink-100 hover:border-pink-200 bg-white"
+                          ),
+                          quizFeedback && option !== words[flashcardIndex].word && selectedOption !== option && "opacity-50"
+                        )}
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+
+                  {quizFeedback && (
+                    <motion.div initial={{ y: 10, opacity: 0 }} animate={{ y: 0, opacity: 1 }} className="mb-8">
+                      {quizFeedback === 'correct' ? (
+                        <p className="text-green-600 font-black text-2xl flex items-center justify-center gap-2">
+                          <CheckCircle2 /> 太棒了！答对了！
+                        </p>
+                      ) : (
+                        <div className="text-red-500">
+                          <p className="font-black text-2xl mb-2">哎呀，选错了哦！</p>
+                          <p className="text-lg">正确答案是：<span className="font-black text-2xl underline">{activeChild.words[flashcardIndex].word}</span></p>
                         </div>
-                      </div>
-
-                      <div className="relative mb-8">
-                        <input
-                          type="text"
-                          value={practiceInput}
-                          onChange={(e) => setPracticeInput(e.target.value)}
-                          onKeyDown={(e) => e.key === 'Enter' && handlePracticeSubmit()}
-                          placeholder="在这里输入英文单词..."
-                          className={cn(
-                            "w-full p-6 rounded-3xl border-4 outline-none transition-all text-3xl font-black text-center tracking-wider",
-                            practiceFeedback === 'correct' ? "border-green-400 bg-green-50 text-green-600" :
-                            practiceFeedback === 'wrong' ? "border-red-400 bg-red-50 text-red-600" :
-                            "border-pink-100 focus:border-pink-300 bg-pink-50/30"
-                          )}
-                          autoFocus
-                        />
-                        {practiceFeedback === 'correct' && (
-                          <motion.div 
-                            initial={{ scale: 0 }} animate={{ scale: 1 }}
-                            className="absolute -top-4 -right-4 bg-green-500 text-white p-2 rounded-full shadow-lg"
-                          >
-                            <CheckCircle2 size={32} />
-                          </motion.div>
-                        )}
-                      </div>
-
-                      {practiceFeedback === 'wrong' && (
-                        <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-red-500 font-bold mb-6">
-                          哎呀，写错了哦！正确答案是: <span className="text-2xl">{currentList.filter(w => !w.isMastered)[flashcardIndex].word}</span>
-                        </motion.p>
                       )}
+                    </motion.div>
+                  )}
 
-                      <div className="flex justify-center gap-4">
-                        {practiceFeedback === null ? (
-                          <Button onClick={handlePracticeSubmit} className="px-12 py-4 text-xl">
-                            检查拼写
-                          </Button>
-                        ) : (
-                          <div className="flex gap-4">
-                            {practiceFeedback === 'correct' && (
-                              <Button 
-                                variant="secondary" 
-                                onClick={() => {
-                                  const wordId = currentList.filter(w => !w.isMastered)[flashcardIndex].id;
-                                  toggleMastery(wordId);
-                                  nextPractice();
-                                }}
-                              >
-                                掌握了，下一个！
-                              </Button>
-                            )}
-                            <Button variant="ghost" onClick={nextPractice}>
-                              {practiceFeedback === 'wrong' ? "记住了，下一个" : "跳过"}
-                            </Button>
-                          </div>
-                        )}
-                      </div>
-                    </Card>
-                    
-                    <div className="mt-8 text-center text-pink-400 font-bold flex items-center justify-center gap-6">
-                      <span>进度: {flashcardIndex + 1} / {currentList.filter(w => !w.isMastered).length}</span>
-                      <Button variant="ghost" onClick={() => setViewMode('dashboard')} className="text-gray-400">
-                        暂时退出
+                  {quizFeedback && (
+                    <div className="flex flex-col gap-4">
+                      <Button onClick={nextQuiz} className="w-full py-4 text-xl">
+                        下一个 <ArrowRight className="ml-2" />
+                      </Button>
+                      <Button variant="ghost" onClick={() => setViewMode('dashboard')}>
+                        结束练习
                       </Button>
                     </div>
-                  </div>
-                ) : (
-                  <Card className="p-12 text-center">
-                    <Trophy className="text-yellow-500 w-20 h-20 mx-auto mb-6" />
-                    <h2 className="text-3xl font-bold text-gray-800 mb-4">全部完成啦！</h2>
-                    <p className="text-gray-500 mb-8">你已经默写完了所有待复习的单词。太棒了！</p>
-                    <Button onClick={() => setViewMode('dashboard')}>
-                      回到进度页面
-                    </Button>
-                  </Card>
-                )}
+                  )}
+                </Card>
               </motion.div>
             )}
+
+            {/* Practice View - Replaced by Quiz */}
 
             {/* Flashcard View */}
             {viewMode === 'flashcard' && (
@@ -1855,10 +2602,10 @@ export default function App() {
                     )}>
                       <Star className="text-yellow-400 mb-6 w-12 h-12 animate-pulse" fill="currentColor" />
                       <h2 className="text-6xl font-black text-pink-600 mb-4">
-                        {currentList[flashcardIndex].word}
+                        {activeChild.words[flashcardIndex].word}
                       </h2>
                       <p className="text-gray-400 font-mono text-xl">
-                        [{currentList[flashcardIndex].phonetic}]
+                        [{activeChild.words[flashcardIndex].phonetic}]
                       </p>
                       <p className="mt-8 text-pink-300 text-sm font-bold uppercase tracking-widest">
                         点击翻面查看含义
@@ -1871,14 +2618,14 @@ export default function App() {
                       !showFlashcardBack && "pointer-events-none"
                     )}>
                       <h2 className="text-4xl font-bold mb-6">
-                        {currentList[flashcardIndex].meaning}
+                        {activeChild.words[flashcardIndex].meaning}
                       </h2>
                       <div className="text-center space-y-4">
                         <p className="text-lg italic opacity-90">
-                          "{currentList[flashcardIndex].example}"
+                          "{activeChild.words[flashcardIndex].example}"
                         </p>
                         <p className="text-sm opacity-75">
-                          {currentList[flashcardIndex].exampleTranslation}
+                          {activeChild.words[flashcardIndex].exampleTranslation}
                         </p>
                       </div>
                       <Button 
@@ -1887,7 +2634,7 @@ export default function App() {
                         disabled={isSpeaking}
                         onClick={(e) => {
                           e.stopPropagation();
-                          speak(currentList[flashcardIndex].word);
+                          speak(activeChild.words[flashcardIndex].word);
                         }}
                       >
                         {isSpeaking ? <Loader2 className="animate-spin" /> : <Volume2 />} 发音
@@ -1910,15 +2657,15 @@ export default function App() {
                   </button>
                   
                   <div className="text-pink-600 font-black text-2xl">
-                    {flashcardIndex + 1} / {currentList.length}
+                    {flashcardIndex + 1} / {activeChild.words.length}
                   </div>
 
                   <button 
                     onClick={() => {
-                      setFlashcardIndex(prev => Math.min(currentList.length - 1, prev + 1));
+                      setFlashcardIndex(prev => Math.min(activeChild.words.length - 1, prev + 1));
                       setShowFlashcardBack(false);
                     }}
-                    disabled={flashcardIndex === currentList.length - 1}
+                    disabled={flashcardIndex === activeChild.words.length - 1}
                     className="p-4 rounded-full bg-white shadow-lg text-pink-500 disabled:opacity-30 active:scale-90 transition-all"
                   >
                     <ChevronRight size={32} />
