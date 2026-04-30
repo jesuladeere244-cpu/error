@@ -23,6 +23,7 @@ import {
   Loader2,
   Camera,
   Image as ImageIcon,
+  FileText,
   X,
   CheckCircle2,
   Circle,
@@ -53,6 +54,7 @@ interface WordEntry {
   meaning: string;
   example: string;
   exampleTranslation: string;
+  compounds?: string[];
   isMastered?: boolean;
   type: 'english' | 'chinese';
 }
@@ -140,12 +142,12 @@ async function evaluatePronunciation(targetText: string, audioBase64: string, ty
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
+      model: "gemini-3-flash-preview",
       contents: [
         { text: prompt },
         { 
           inlineData: { 
-            mimeType: "audio/webm", // MediaRecorder usually outputs webm
+            mimeType: "audio/webm", // Gemini supports webm/mp4/etc
             data: audioBase64 
           } 
         }
@@ -171,31 +173,55 @@ async function evaluatePronunciation(targetText: string, audioBase64: string, ty
   }
 }
 
-async function extractWordsFromImage(base64Data: string, grade: number): Promise<string[]> {
-  const prompt = `请识别这张图片中的所有英语单词或中文生字。这些通常是小学${grade}年级课本上的内容。请只返回单词或生字列表，用逗号隔开。`;
-  
+async function extractWordsFromFile(base64Data: string, grade: number): Promise<string[]> {
   const mimeType = base64Data.split(';')[0].split(':')[1] || 'image/jpeg';
+  const isPdf = mimeType === 'application/pdf';
+
+  const prompt = isPdf 
+    ? `你是一个专业的文档分析助手。请从这个PDF文档中提取所有适合小学${grade}年级学习的英语单词或中文生字。
+  
+  要求：
+  1. 准确提取文档中的重点词汇。
+  2. 如果是英语单词，请保留完整拼写。
+  3. 如果是中文生字，请提取单个汉字或词语。
+  4. 请只返回提取到的单词或生字列表，用英文逗号隔开，不要有任何其他解释文字。
+  5. 如果文档内容太少，请返回空字符串。`
+    : `你是一个专业的OCR文字识别助手。请识别这张图片中的所有英语单词或中文生字。
+  这些通常是小学${grade}年级课本上的内容。
+  
+  要求：
+  1. 准确识别图片中的每一个文字。
+  2. 如果是英语单词，请保留完整拼写。
+  3. 如果是中文生字，请提取单个汉字或词语。
+  4. 请只返回识别到的单词或生字列表，用英文逗号隔开，不要有任何其他解释文字。
+  5. 如果图片模糊无法识别，请返回空字符串。`;
+  
   const base64 = base64Data.split(',')[1];
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: {
-        parts: [
-          { text: prompt },
-          { 
-            inlineData: { 
-              mimeType: mimeType, 
-              data: base64
-            } 
-          }
-        ]
-      }
+      model: "gemini-3-flash-preview",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: prompt },
+            { 
+              inlineData: { 
+                mimeType: mimeType, 
+                data: base64
+              } 
+            }
+          ]
+        }
+      ]
     });
 
     const text = response.text;
-    if (!text) return [];
-    return text.split(/[,\s\n]+/).filter(w => w.trim().length > 0);
+    if (!text || text.trim() === "") return [];
+    // Clean up the response in case the model adds extra characters
+    const cleanedText = text.replace(/[`]/g, '').trim();
+    return cleanedText.split(/[,\s\n，]+/).filter(w => w.trim().length > 0);
   } catch (error) {
     console.error("Gemini OCR Error:", error);
     throw error;
@@ -212,14 +238,15 @@ async function generateWordDetails(words: string[], grade: number): Promise<Word
   1. 如果是英语单词，提供音标；如果是中文生字，提供拼音。
   2. 提供准确的中文含义（如果是英语）或英文含义/简单中文解释（如果是中文），适合${grade}年级学生理解。
   3. 提供一个简单有趣的例句，并附带翻译。
-  4. 例句要贴近${grade}年级小学生的日常生活。
-  5. 标记类型 type 为 'english' 或 'chinese'。
+  4. 如果是中文生字，请额外提供2-3个常用的组词（compounds）。
+  5. 例句要贴近${grade}年级小学生的日常生活。
+  6. 标记类型 type 为 'english' 或 'chinese'。
   
   请以 JSON 数组格式返回。`;
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
+      model: "gemini-3-flash-preview",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -234,6 +261,7 @@ async function generateWordDetails(words: string[], grade: number): Promise<Word
               meaning: { type: Type.STRING },
               example: { type: Type.STRING },
               exampleTranslation: { type: Type.STRING },
+              compounds: { type: Type.ARRAY, items: { type: Type.STRING } },
               type: { type: Type.STRING, enum: ['english', 'chinese'] },
             },
             required: ["id", "word", "phonetic", "meaning", "example", "exampleTranslation", "type"],
@@ -269,7 +297,7 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
     const isAdultVisually = isAdult || isLevel5Plus;
 
     const getPetIcon = (size: number) => {
-      const iconSize = isAdultVisually ? size * 1.2 : size;
+      const iconSize = isAdultVisually ? size * 1.4 : size;
       switch (pet.type) {
         case 'cat': return <Heart size={iconSize * scale} fill="currentColor" />;
         case 'dog': return <Star size={iconSize * scale} fill="currentColor" />;
@@ -356,6 +384,18 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Level 5+ White Aura / Glow */}
+      {isAdultVisually && (
+        <motion.div
+          animate={{ 
+            scale: [1, 1.2, 1],
+            opacity: [0.3, 0.6, 0.3]
+          }}
+          transition={{ duration: 4, repeat: Infinity }}
+          className="absolute inset-0 -m-12 bg-white/40 rounded-full blur-2xl z-0"
+        />
+      )}
 
       {/* Level 20+ Rainbow Aura */}
       {isLevel20Plus && (
@@ -603,7 +643,7 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
             <div className={cn(
               "rounded-[3rem] flex items-center justify-center text-white shadow-2xl relative overflow-hidden transition-all duration-700",
               isBaby ? "w-36 h-36" : "w-48 h-48",
-              isAdultVisually && "scale-110 ring-4 ring-white/50",
+              isAdultVisually && "scale-125 ring-8 ring-white/60 shadow-[0_0_40px_rgba(255,255,255,0.5)]",
               getPetColor(),
               isLevel20Plus && "ring-8 ring-yellow-300 ring-offset-4 ring-offset-white"
             )}>
@@ -680,12 +720,13 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
                       transition={{ duration: 4, repeat: Infinity, times: [0, 0.45, 0.5, 0.55, 1] }}
                       className={cn(
                         "rounded-full", 
-                        (isLevel15Plus || pet.type === 'frog') ? "bg-yellow-200 shadow-[0_0_10px_rgba(255,255,255,0.8)]" : "bg-white"
+                        (isLevel15Plus || pet.type === 'frog') ? "bg-yellow-200 shadow-[0_0_10px_rgba(255,255,255,0.8)]" : 
+                        (pet.type === 'panda' || pet.type === 'zebra' || pet.type === 'cow') ? "bg-black" : "bg-white"
                       )} 
                       style={{ 
-                        width: (isAdultVisually ? 8 : 4) * scale, 
-                        height: (isAdultVisually ? 8 : 4) * scale,
-                        backgroundColor: pet.type === 'bear' ? '#000' : undefined // Bear has black eyes
+                        width: (isAdultVisually ? 12 : 6) * scale, 
+                        height: (isAdultVisually ? 12 : 6) * scale,
+                        boxShadow: isAdultVisually ? '0 0 15px rgba(255,255,255,0.9)' : undefined
                       }}
                     />
                     <motion.div 
@@ -693,12 +734,13 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
                       transition={{ duration: 4, repeat: Infinity, times: [0, 0.45, 0.5, 0.55, 1] }}
                       className={cn(
                         "rounded-full", 
-                        (isLevel15Plus || pet.type === 'frog') ? "bg-yellow-200 shadow-[0_0_10px_rgba(255,255,255,0.8)]" : "bg-white"
+                        (isLevel15Plus || pet.type === 'frog') ? "bg-yellow-200 shadow-[0_0_10px_rgba(255,255,255,0.8)]" : 
+                        (pet.type === 'panda' || pet.type === 'zebra' || pet.type === 'cow') ? "bg-black" : "bg-white"
                       )} 
                       style={{ 
-                        width: (isAdultVisually ? 8 : 4) * scale, 
-                        height: (isAdultVisually ? 8 : 4) * scale,
-                        backgroundColor: pet.type === 'bear' ? '#000' : undefined // Bear has black eyes
+                        width: (isAdultVisually ? 12 : 6) * scale, 
+                        height: (isAdultVisually ? 12 : 6) * scale,
+                        boxShadow: isAdultVisually ? '0 0 15px rgba(255,255,255,0.9)' : undefined
                       }}
                     />
                   </>
@@ -725,10 +767,11 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
             {isAdultVisually && (
               <motion.div 
                 initial={{ y: -20, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                className="absolute -top-10 left-1/2 -translate-x-1/2 text-yellow-500 drop-shadow-md z-30"
+                animate={{ y: [0, -10, 0], opacity: 1 }}
+                transition={{ duration: 2, repeat: Infinity }}
+                className="absolute -top-16 left-1/2 -translate-x-1/2 text-yellow-400 drop-shadow-[0_0_15px_rgba(250,204,21,0.8)] z-30"
               >
-                <Award size={48 * scale} fill="currentColor" />
+                <Award size={64 * scale} fill="currentColor" />
               </motion.div>
             )}
 
@@ -757,7 +800,7 @@ const PetVisual = ({ pet, scale = 1, onPet }: { pet: PetState, scale?: number, o
             <AnimatePresence>
               {[...Array(isLevel5Plus ? 6 : 3)].map((_, i) => (
                 <motion.div
-                  key={i}
+                  key={`particle-${pet.name}-${i}`}
                   initial={{ opacity: 0, scale: 0, x: 0, y: 0 }}
                   animate={{ 
                     opacity: [0, 1, 0], 
@@ -832,7 +875,20 @@ export default function App() {
   
   const [child1, setChild1] = useState<ChildProfile>(() => {
     const saved = localStorage.getItem('moemoe_child1');
-    if (saved) return JSON.parse(saved);
+    if (saved) {
+      const data = JSON.parse(saved);
+      const seenIds = new Set();
+      data.words = data.words.map((w: any) => {
+        if (!w.id || seenIds.has(w.id)) {
+          const newId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+          seenIds.add(newId);
+          return { ...w, id: newId };
+        }
+        seenIds.add(w.id);
+        return w;
+      });
+      return data;
+    }
     return {
       id: 'child1',
       grade: 2,
@@ -861,7 +917,20 @@ export default function App() {
 
   const [child2, setChild2] = useState<ChildProfile>(() => {
     const saved = localStorage.getItem('moemoe_child2');
-    if (saved) return JSON.parse(saved);
+    if (saved) {
+      const data = JSON.parse(saved);
+      const seenIds = new Set();
+      data.words = data.words.map((w: any) => {
+        if (!w.id || seenIds.has(w.id)) {
+          const newId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+          seenIds.add(newId);
+          return { ...w, id: newId };
+        }
+        seenIds.add(w.id);
+        return w;
+      });
+      return data;
+    }
     return {
       id: 'child2',
       grade: 4,
@@ -918,9 +987,10 @@ export default function App() {
   };
 
   const [inputText, setInputText] = useState('');
-  const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [viewMode, setViewMode] = useState<'input' | 'list' | 'flashcard' | 'practice' | 'dashboard' | 'pet' | 'shop' | 'challenge' | 'quiz'>('dashboard');
+  const [viewMode, setViewMode] = useState<'input' | 'list' | 'flashcard' | 'practice' | 'dashboard' | 'pet' | 'shop' | 'challenge' | 'quiz' | 'recitation' | 'dictation'>('dashboard');
+  const [activeSubject, setActiveSubject] = useState<'english' | 'chinese'>('english');
   const [flashcardIndex, setFlashcardIndex] = useState(0);
   const [showFlashcardBack, setShowFlashcardBack] = useState(false);
   const [practiceInput, setPracticeInput] = useState('');
@@ -939,7 +1009,8 @@ export default function App() {
   // Challenge Mode State
   const [challengeStreak, setChallengeStreak] = useState(0);
   const [challengeWord, setChallengeWord] = useState<WordEntry | null>(null);
-  const [challengeType, setChallengeType] = useState<'word' | 'sentence'>('word');
+  const [challengeType, setChallengeType] = useState<'word' | 'sentence' | 'pinyin' | 'character'>('word');
+  const [challengeQueue, setChallengeQueue] = useState<string[]>([]);
   const [challengeFeedback, setChallengeFeedback] = useState<'correct' | 'wrong' | null>(null);
   const [challengeInput, setChallengeInput] = useState('');
 
@@ -951,14 +1022,45 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
 
+  // Recitation State
+  const [recitationInput, setRecitationInput] = useState('');
+  const [recitationFeedback, setRecitationFeedback] = useState<'correct' | 'wrong' | null>(null);
+
+  const filteredWords = activeChild.words.filter(w => (w.type || 'english') === activeSubject);
   const stats: StudyStats = {
-    total: activeChild.words.length,
-    mastered: activeChild.words.filter(w => w.isMastered).length,
-    unmastered: activeChild.words.filter(w => !w.isMastered).length
+    total: filteredWords.length,
+    mastered: filteredWords.filter(w => w.isMastered).length,
+    unmastered: filteredWords.filter(w => !w.isMastered).length
   };
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Initialize/Resume AudioContext on any user interaction
+  useEffect(() => {
+    const initAudio = async () => {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      if (audioContextRef.current.state === 'suspended') {
+        await audioContextRef.current.resume();
+      }
+    };
+
+    window.addEventListener('click', initAudio, { once: false });
+    window.addEventListener('touchstart', initAudio, { once: false });
+    return () => {
+      window.removeEventListener('click', initAudio);
+      window.removeEventListener('touchstart', initAudio);
+    };
+  }, []);
+
+  // Evolution sync
+  useEffect(() => {
+    if (activeChild.pet.level >= 5 && activeChild.pet.stage === 'baby') {
+      updateActivePet({ stage: 'adult' });
+    }
+  }, [activeChild.pet.level, activeChild.pet.stage]);
 
   // Save data to localStorage
   useEffect(() => {
@@ -987,7 +1089,15 @@ export default function App() {
   const playSound = (type: 'correct' | 'wrong' | 'levelup' | 'click') => {
     if (!isSoundEnabled) return;
     try {
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      const audioCtx = audioContextRef.current;
+      
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+
       const oscillator = audioCtx.createOscillator();
       const gainNode = audioCtx.createGain();
 
@@ -1151,8 +1261,17 @@ export default function App() {
 
   const startRecording = async (target: string) => {
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("您的浏览器不支持录音功能，请尝试使用 Chrome 或 Edge 浏览器。");
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+      
+      // Determine supported mime type
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 
+                       MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
+      
+      const mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
@@ -1163,22 +1282,24 @@ export default function App() {
       };
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const recordedMimeType = mediaRecorder.mimeType || 'audio/webm';
+        const audioBlob = new Blob(audioChunksRef.current, { type: recordedMimeType });
         const url = URL.createObjectURL(audioBlob);
         setLastRecordingUrl(url);
         
         const reader = new FileReader();
         reader.readAsDataURL(audioBlob);
         reader.onloadend = async () => {
-          const base64Audio = (reader.result as string).split(',')[1];
-          setIsLoading(true);
-          const result = await evaluatePronunciation(target, base64Audio, 'english');
-          setEvaluationResult(result);
-          setIsLoading(false);
-          
-          // Award points based on score
-          if (result.score >= 60) {
-            completeStudyAction(3);
+          try {
+            const base64Audio = (reader.result as string).split(',')[1];
+            setIsLoading(true);
+            const result = await evaluatePronunciation(target, base64Audio, activeSubject);
+            setEvaluationResult(result);
+          } catch (err) {
+            console.error("Evaluation error:", err);
+            alert("评分失败，请稍后再试。");
+          } finally {
+            setIsLoading(false);
           }
         };
         stream.getTracks().forEach(track => track.stop());
@@ -1191,25 +1312,36 @@ export default function App() {
       mediaRecorder.start();
     } catch (err) {
       console.error("Microphone error:", err);
+      setIsRecording(false);
       const errorMessage = err instanceof Error ? err.message : String(err);
       if (errorMessage.toLowerCase().includes('permission') || errorMessage.toLowerCase().includes('dismissed')) {
         alert("麦克风权限被拒绝或取消了。请在浏览器地址栏点击锁形图标，开启麦克风权限，然后刷新页面重试。");
       } else {
-        alert("无法访问麦克风，请检查权限。");
+        alert(errorMessage || "无法访问麦克风，请检查权限。");
       }
     }
   };
 
-  const playLastRecording = () => {
+  const playLastRecording = async () => {
     if (lastRecordingUrl) {
-      const audio = new Audio(lastRecordingUrl);
-      audio.play();
+      try {
+        if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+          await audioContextRef.current.resume();
+        }
+        const audio = new Audio(lastRecordingUrl);
+        await audio.play();
+      } catch (err) {
+        console.error("Playback error:", err);
+        alert("无法播放录音，请重试。");
+      }
     }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    } else {
       setIsRecording(false);
     }
   };
@@ -1299,17 +1431,22 @@ export default function App() {
   };
 
   const speak = async (text: string) => {
-    if (isSpeaking) return;
+    if (isSpeaking || !isSoundEnabled) return;
     setIsSpeaking(true);
+    console.log("Speaking:", text);
+    
     try {
+      const isChinese = /[\u4e00-\u9fa5]/.test(text);
+      const prompt = isChinese ? `请用标准普通话清晰地朗读：${text}` : `Say clearly: ${text}`;
+      
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
-        contents: [{ parts: [{ text: `Say clearly: ${text}` }] }],
+        contents: [{ parts: [{ text: prompt }] }],
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
             voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: 'Kore' },
+              prebuiltVoiceConfig: { voiceName: isChinese ? 'aoede' : 'kore' },
             },
           },
         },
@@ -1328,7 +1465,11 @@ export default function App() {
           audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
         }
 
-        // Gemini TTS returns raw 16-bit PCM at 24kHz
+        if (audioContextRef.current.state === 'suspended') {
+          await audioContextRef.current.resume();
+        }
+
+        // Ensure the data is 16-bit PCM as expected by the model output
         const pcmData = new Int16Array(arrayBuffer);
         const float32Data = new Float32Array(pcmData.length);
         for (let i = 0; i < pcmData.length; i++) {
@@ -1344,15 +1485,22 @@ export default function App() {
         source.onended = () => setIsSpeaking(false);
         source.start(0);
       } else {
-        // Fallback to browser TTS
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = 'en-US';
-        utterance.onend = () => setIsSpeaking(false);
-        window.speechSynthesis.speak(utterance);
+        throw new Error("No audio data received");
       }
     } catch (error) {
       console.error("TTS Error:", error);
-      setIsSpeaking(false);
+      // Fallback to browser TTS
+      try {
+        const isChinese = /[\u4e00-\u9fa5]/.test(text);
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = isChinese ? 'zh-CN' : 'en-US';
+        utterance.onend = () => setIsSpeaking(false);
+        utterance.onerror = () => setIsSpeaking(false);
+        window.speechSynthesis.speak(utterance);
+      } catch (fallbackError) {
+        console.error("Fallback TTS Error:", fallbackError);
+        setIsSpeaking(false);
+      }
     }
   };
 
@@ -1362,20 +1510,20 @@ export default function App() {
     });
   };
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
       reader.onloadend = () => {
-        setSelectedImage(reader.result as string);
+        setSelectedFile(reader.result as string);
       };
       reader.readAsDataURL(file);
     }
   };
 
   const handleGenerate = async () => {
-    if (!selectedImage && !inputText.trim()) {
-      alert("请先拍照或输入单词哦！");
+    if (!selectedFile && !inputText.trim()) {
+      alert("请先拍照、上传文件或输入内容哦！");
       return;
     }
     
@@ -1383,25 +1531,34 @@ export default function App() {
     try {
       let wordsToProcess: string[] = [];
       
-      if (selectedImage) {
-        wordsToProcess = await extractWordsFromImage(selectedImage, activeChild.grade);
+      if (selectedFile) {
+        wordsToProcess = await extractWordsFromFile(selectedFile, activeChild.grade);
       } else if (inputText.trim()) {
         wordsToProcess = inputText.split(/[,\s\n]+/).filter(w => w.trim().length > 0);
       }
 
       if (wordsToProcess.length > 0) {
         const details = await generateWordDetails(wordsToProcess, activeChild.grade);
+        const processedDetails = details.map(d => ({
+          ...d,
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+        }));
+        
         updateActiveChild({
           words: [
             ...activeChild.words,
-            ...details.filter(d => !activeChild.words.some(w => w.word.toLowerCase() === d.word.toLowerCase()))
+            ...processedDetails.filter(d => !activeChild.words.some(w => w.word === d.word))
           ]
         });
+        // Auto switch to the subject of the first generated word
+        if (details.length > 0) {
+          setActiveSubject(details[0].type);
+        }
         setViewMode('list');
         setInputText('');
-        setSelectedImage(null);
+        setSelectedFile(null);
       } else {
-        alert("未能从图片中识别到单词，请尝试换个角度拍照或手动输入。");
+        alert("未能识别到内容，请提示尝试换个角度拍照或确保文件包含文字内容。");
       }
     } catch (error) {
       console.error("Generate Error:", error);
@@ -1435,12 +1592,31 @@ export default function App() {
   };
 
   const startChallenge = () => {
-    if (activeChild.words.length === 0) {
-      alert("请先添加一些单词吧！");
+    if (filteredWords.length === 0) {
+      alert("请先添加一些内容吧！");
       return;
     }
-    const randomWord = activeChild.words[Math.floor(Math.random() * activeChild.words.length)];
-    const type = Math.random() > 0.5 ? 'sentence' : 'word';
+    
+    const shuffledIds = [...filteredWords].sort(() => Math.random() - 0.5).map(w => w.id);
+    const firstWordId = shuffledIds[0];
+    const randomWord = filteredWords.find(w => w.id === firstWordId)!;
+    
+    setChallengeQueue(shuffledIds.slice(1));
+
+    let type: 'word' | 'sentence' | 'pinyin' | 'character' = 'word';
+    
+    if (activeSubject === 'chinese') {
+      type = Math.random() > 0.5 ? 'character' : 'pinyin';
+      if (type === 'pinyin') {
+        const otherWords = filteredWords.filter(w => w.id !== randomWord.id);
+        const shuffledOthers = [...otherWords].sort(() => 0.5 - Math.random());
+        const options = [randomWord.phonetic, ...shuffledOthers.slice(0, 3).map(w => w.phonetic)].sort(() => 0.5 - Math.random());
+        setQuizOptions(options);
+      }
+    } else {
+      type = Math.random() > 0.5 ? 'sentence' : 'word';
+    }
+
     setChallengeWord(randomWord);
     setChallengeType(type);
     setChallengeInput('');
@@ -1450,37 +1626,174 @@ export default function App() {
 
   const handleChallengeSubmit = () => {
     if (!challengeWord) return;
-    const target = challengeType === 'word' ? challengeWord.word : challengeWord.example;
-    const cleanInput = challengeInput.trim().toLowerCase().replace(/[.?!,]/g, '');
-    const cleanTarget = target.toLowerCase().replace(/[.?!,]/g, '');
+    
+    let isCorrect = false;
+    if (challengeType === 'pinyin') {
+      // Pinyin is handled by selecting options, but we can have a fallback
+      return;
+    }
 
-      if (cleanInput === cleanTarget) {
-        setChallengeFeedback('correct');
-        setChallengeStreak(prev => prev + 1);
-        const basePoints = challengeType === 'sentence' ? 20 : 10;
-        completeStudyAction(basePoints + Math.min(challengeStreak * 2, 20)); // Bonus points for streak
-        
-        // Pet reaction
-        updateActivePet({
-          speech: challengeType === 'sentence' ? `哇！句子都写对了！奖励翻倍！连击 x${challengeStreak + 1}！` : `太棒了！连击 x${challengeStreak + 1}！继续挑战吧！`
-        });
-      } else {
-        setChallengeFeedback('wrong');
-        playSound('wrong');
-        setChallengeStreak(0);
-        updateActivePet({
-          speech: "哎呀，没关系，再试一次！"
-        });
-      }
+    const target = challengeType === 'word' ? challengeWord.word : 
+                   challengeType === 'character' ? challengeWord.word :
+                   challengeWord.example;
+    
+    const cleanInput = challengeInput.trim().toLowerCase().replace(/[.?!,，。？！]/g, '');
+    const cleanTarget = target.toLowerCase().replace(/[.?!,，。？！]/g, '');
+
+    isCorrect = cleanInput === cleanTarget;
+
+    if (isCorrect) {
+      setChallengeFeedback('correct');
+      setChallengeStreak(prev => prev + 1);
+      const basePoints = (challengeType === 'sentence' || challengeType === 'character') ? 20 : 10;
+      completeStudyAction(basePoints + Math.min(challengeStreak * 2, 20));
+      
+      updateActivePet({
+        speech: challengeType === 'sentence' ? `哇！句子都写对了！奖励翻倍！连击 x${challengeStreak + 1}！` : 
+                challengeType === 'character' ? `太棒了！生字写对了！连击 x${challengeStreak + 1}！` :
+                `太棒了！连击 x${challengeStreak + 1}！继续挑战吧！`
+      });
+    } else {
+      setChallengeFeedback('wrong');
+      playSound('wrong');
+      setChallengeStreak(0);
+      updateActivePet({
+        speech: "哎呀，没关系，再试一次！"
+      });
+    }
+  };
+
+  const handlePinyinChallenge = (option: string) => {
+    if (!challengeWord) return;
+    setSelectedOption(option);
+    if (option === challengeWord.phonetic) {
+      setChallengeFeedback('correct');
+      setChallengeStreak(prev => prev + 1);
+      completeStudyAction(10 + Math.min(challengeStreak * 2, 20));
+      updateActivePet({
+        speech: `拼音选对啦！连击 x${challengeStreak + 1}！`
+      });
+    } else {
+      setChallengeFeedback('wrong');
+      playSound('wrong');
+      setChallengeStreak(0);
+      updateActivePet({
+        speech: "拼音选错了哦，再接再厉！"
+      });
+    }
   };
 
   const nextChallenge = () => {
-    const randomWord = activeChild.words[Math.floor(Math.random() * activeChild.words.length)];
-    const type = Math.random() > 0.5 ? 'sentence' : 'word';
+    if (filteredWords.length === 0) return;
+
+    let nextId = challengeQueue[0];
+    let newQueue = challengeQueue.slice(1);
+    
+    if (!nextId) {
+      // Refresh queue if empty
+      const shuffledIds = [...filteredWords].sort(() => Math.random() - 0.5).map(w => w.id);
+      nextId = shuffledIds[0];
+      newQueue = shuffledIds.slice(1);
+    }
+    
+    const randomWord = filteredWords.find(w => w.id === nextId) || filteredWords[0];
+    setChallengeQueue(newQueue);
+
+    let type: 'word' | 'sentence' | 'pinyin' | 'character' = 'word';
+    
+    if (activeSubject === 'chinese') {
+      type = Math.random() > 0.5 ? 'character' : 'pinyin';
+      if (type === 'pinyin') {
+        const otherWords = filteredWords.filter(w => w.id !== randomWord.id);
+        const shuffledOthers = [...otherWords].sort(() => 0.5 - Math.random());
+        const options = [randomWord.phonetic, ...shuffledOthers.slice(0, 3).map(w => w.phonetic)].sort(() => 0.5 - Math.random());
+        setQuizOptions(options);
+      }
+    } else {
+      type = Math.random() > 0.5 ? 'sentence' : 'word';
+    }
+
     setChallengeWord(randomWord);
     setChallengeType(type);
     setChallengeInput('');
     setChallengeFeedback(null);
+    setSelectedOption(null);
+  };
+
+  const startRecitation = () => {
+    if (filteredWords.length === 0) {
+      alert("请先添加一些内容吧！");
+      return;
+    }
+    setFlashcardIndex(0);
+    setShowFlashcardBack(false);
+    setRecitationInput('');
+    setRecitationFeedback(null);
+    setViewMode('recitation');
+  };
+
+  const handleRecitationSubmit = () => {
+    const currentWord = filteredWords[flashcardIndex];
+    const cleanInput = recitationInput.trim().toLowerCase();
+    const target = currentWord.word.toLowerCase();
+
+    if (cleanInput === target) {
+      setRecitationFeedback('correct');
+      completeStudyAction(5);
+      updateActivePet({ speech: "背诵正确！你真棒！✨" });
+      setShowFlashcardBack(true);
+    } else {
+      setRecitationFeedback('wrong');
+      playSound('wrong');
+      updateActivePet({ speech: "好像不对哦，再想想？或者点击‘查看答案’提示一下。" });
+    }
+  };
+
+  const nextRecitation = () => {
+    if (flashcardIndex < filteredWords.length - 1) {
+      setFlashcardIndex(prev => prev + 1);
+      setShowFlashcardBack(false);
+      setRecitationInput('');
+      setRecitationFeedback(null);
+    } else {
+      setViewMode('dashboard');
+    }
+  };
+
+  const startDictation = () => {
+    if (filteredWords.length === 0) {
+      alert("请先添加一些内容吧！");
+      return;
+    }
+    setFlashcardIndex(0);
+    setPracticeInput('');
+    setPracticeFeedback(null);
+    setViewMode('dictation');
+    setTimeout(() => speak(filteredWords[0].word), 500);
+  };
+
+  const handleDictationSubmit = () => {
+    const currentWord = filteredWords[flashcardIndex];
+    if (practiceInput.trim().toLowerCase() === currentWord.word.toLowerCase()) {
+      setPracticeFeedback('correct');
+      completeStudyAction(5);
+      updateActivePet({ speech: "听写正确！太棒了！✨" });
+    } else {
+      setPracticeFeedback('wrong');
+      playSound('wrong');
+      updateActivePet({ speech: "哎呀，听写错了，再听一遍试试？" });
+    }
+  };
+
+  const nextDictation = () => {
+    if (flashcardIndex < filteredWords.length - 1) {
+      setFlashcardIndex(prev => prev + 1);
+      setPracticeInput('');
+      setPracticeFeedback(null);
+      setTimeout(() => speak(filteredWords[flashcardIndex + 1].word), 500);
+    } else {
+      setViewMode('dashboard');
+    }
   };
 
   const startQuiz = () => {
@@ -1548,47 +1861,72 @@ export default function App() {
 
       <div className="max-w-4xl mx-auto">
         {/* Header */}
-        <header className="text-center mb-12 relative">
-          <div className="absolute top-0 right-0 flex gap-2">
-            {/* Profile Switcher */}
-            <div className="flex bg-pink-50 rounded-2xl p-1 mr-2">
+        <header className="mb-12 relative flex flex-col items-center">
+          <div className="w-full flex flex-col md:flex-row items-center justify-between gap-4 mb-8">
+            <div className="flex items-center gap-2 bg-pink-50 rounded-2xl p-1">
+              {/* Subject Switcher */}
               <button 
-                onClick={() => setActiveChildId('child1')}
+                onClick={() => setActiveSubject('english')}
                 className={cn(
                   "px-4 py-2 rounded-xl text-sm font-black transition-all",
-                  activeChildId === 'child1' ? "bg-white text-pink-500 shadow-md" : "text-gray-400 hover:text-gray-600"
+                  activeSubject === 'english' ? "bg-white text-pink-500 shadow-md" : "text-gray-400 hover:text-gray-600"
                 )}
               >
-                2年级
+                英语
               </button>
               <button 
-                onClick={() => setActiveChildId('child2')}
+                onClick={() => setActiveSubject('chinese')}
                 className={cn(
                   "px-4 py-2 rounded-xl text-sm font-black transition-all",
-                  activeChildId === 'child2' ? "bg-white text-pink-500 shadow-md" : "text-gray-400 hover:text-gray-600"
+                  activeSubject === 'chinese' ? "bg-white text-pink-500 shadow-md" : "text-gray-400 hover:text-gray-600"
                 )}
               >
-                4年级
+                语文
               </button>
             </div>
 
-            <Button 
-              variant="ghost" 
-              onClick={() => setIsSoundEnabled(!isSoundEnabled)}
-              className="p-2"
-            >
-              {isSoundEnabled ? <Volume2 className="w-6 h-6" /> : <MicOff className="w-6 h-6" />}
-            </Button>
+            <div className="flex items-center gap-2">
+              {/* Profile Switcher */}
+              <div className="flex bg-pink-50 rounded-2xl p-1">
+                <button 
+                  onClick={() => setActiveChildId('child1')}
+                  className={cn(
+                    "px-4 py-2 rounded-xl text-sm font-black transition-all",
+                    activeChildId === 'child1' ? "bg-white text-pink-500 shadow-md" : "text-gray-400 hover:text-gray-600"
+                  )}
+                >
+                  2年级
+                </button>
+                <button 
+                  onClick={() => setActiveChildId('child2')}
+                  className={cn(
+                    "px-4 py-2 rounded-xl text-sm font-black transition-all",
+                    activeChildId === 'child2' ? "bg-white text-pink-500 shadow-md" : "text-gray-400 hover:text-gray-600"
+                  )}
+                >
+                  4年级
+                </button>
+              </div>
+
+              <Button 
+                variant="ghost" 
+                onClick={() => setIsSoundEnabled(!isSoundEnabled)}
+                className="p-2"
+              >
+                {isSoundEnabled ? <Volume2 className="w-6 h-6" /> : <MicOff className="w-6 h-6" />}
+              </Button>
+            </div>
           </div>
+
           <motion.div 
             initial={{ scale: 0.8, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
-            className="inline-block"
+            className="text-center"
           >
             <div className="flex items-center justify-center gap-3 mb-2">
               <Sparkles className="text-pink-500 w-8 h-8" />
               <h1 className="text-4xl md:text-5xl font-black text-pink-600 tracking-tight">
-                萌萌单词本
+                萌萌学习伴侣
               </h1>
               <Sparkles className="text-pink-500 w-8 h-8" />
             </div>
@@ -1627,6 +1965,20 @@ export default function App() {
             className="px-4 md:px-6 py-2 text-sm md:text-base"
           >
             <PenTool className="w-4 h-4 md:w-5 md:h-5" /> 选择题
+          </Button>
+          <Button 
+            variant={viewMode === 'recitation' ? 'secondary' : 'ghost'} 
+            onClick={startRecitation}
+            className="px-4 md:px-6 py-2 text-sm md:text-base"
+          >
+            <History className="w-4 h-4 md:w-5 md:h-5" /> 背诵
+          </Button>
+          <Button 
+            variant={viewMode === 'dictation' ? 'secondary' : 'ghost'} 
+            onClick={startDictation}
+            className="px-4 md:px-6 py-2 text-sm md:text-base"
+          >
+            <Mic className="w-4 h-4 md:w-5 md:h-5" /> 听写
           </Button>
           <Button 
             variant={viewMode === 'pet' ? 'secondary' : 'ghost'} 
@@ -1678,15 +2030,20 @@ export default function App() {
 
                   <div className="mb-8">
                     <span className="text-sm font-bold text-pink-400 uppercase tracking-widest">
-                      {challengeType === 'word' ? '单词挑战' : '句子挑战 (双倍积分!)'}
+                      {challengeType === 'word' ? '单词挑战' : 
+                       challengeType === 'sentence' ? '句子挑战 (双倍积分!)' :
+                       challengeType === 'pinyin' ? '拼音挑战' : '生字挑战 (双倍积分!)'}
                     </span>
                     <h2 className="text-4xl font-black text-gray-800 mt-2">
-                      {challengeType === 'word' ? challengeWord.meaning : challengeWord.exampleTranslation}
+                      {challengeType === 'word' ? challengeWord.meaning : 
+                       challengeType === 'sentence' ? challengeWord.exampleTranslation :
+                       challengeType === 'pinyin' ? challengeWord.word :
+                       challengeWord.meaning}
                     </h2>
-                    {challengeType === 'sentence' && (
+                    {(challengeType === 'sentence' || challengeType === 'pinyin') && (
                       <div className="mt-4 flex justify-center gap-2">
-                        <button onClick={() => speak(challengeWord.example)} className="text-blue-400 hover:text-blue-600 flex items-center gap-1 font-bold">
-                          <Volume2 size={18} /> 听句子
+                        <button onClick={() => speak(challengeType === 'sentence' ? challengeWord.example : challengeWord.word)} className="text-blue-400 hover:text-blue-600 flex items-center gap-1 font-bold">
+                          <Volume2 size={18} /> {challengeType === 'pinyin' ? '听发音' : '听句子'}
                         </button>
                       </div>
                     )}
@@ -1694,13 +2051,31 @@ export default function App() {
 
                   <div className="space-y-6">
                     <div className="relative">
-                      {challengeType === 'word' ? (
+                      {challengeType === 'pinyin' ? (
+                        <div className="grid grid-cols-2 gap-4">
+                          {quizOptions.map((option, idx) => (
+                            <button
+                              key={idx}
+                              onClick={() => !challengeFeedback && handlePinyinChallenge(option)}
+                              disabled={!!challengeFeedback}
+                              className={cn(
+                                "p-6 rounded-3xl text-2xl font-bold transition-all border-4",
+                                selectedOption === option 
+                                  ? (option === challengeWord.phonetic ? "bg-green-500 text-white border-green-600" : "bg-red-500 text-white border-red-600")
+                                  : (challengeFeedback && option === challengeWord.phonetic ? "bg-green-100 text-green-600 border-green-400" : "bg-white text-gray-700 border-pink-100 hover:border-pink-300")
+                              )}
+                            >
+                              {option}
+                            </button>
+                          ))}
+                        </div>
+                      ) : challengeType === 'word' || challengeType === 'character' ? (
                         <input
                           type="text"
                           value={challengeInput}
                           onChange={(e) => setChallengeInput(e.target.value)}
                           onKeyDown={(e) => e.key === 'Enter' && !challengeFeedback && handleChallengeSubmit()}
-                          placeholder="输入英文单词..."
+                          placeholder={challengeType === 'word' ? "输入英文单词..." : "输入汉字..."}
                           disabled={!!challengeFeedback}
                           className={cn(
                             "w-full px-8 py-6 rounded-3xl text-3xl font-bold text-center border-4 outline-none transition-all",
@@ -1750,10 +2125,13 @@ export default function App() {
                         <div className="p-6 bg-gray-50 rounded-3xl border-2 border-dashed border-gray-200">
                           <p className="text-sm text-gray-400 mb-1">正确答案是：</p>
                           <p className="text-2xl md:text-3xl font-black text-gray-800">
-                            {challengeType === 'word' ? challengeWord.word : challengeWord.example}
+                            {challengeType === 'word' ? challengeWord.word : 
+                             challengeType === 'sentence' ? challengeWord.example :
+                             challengeType === 'pinyin' ? challengeWord.phonetic :
+                             challengeWord.word}
                           </p>
                           <div className="flex justify-center gap-4 mt-4">
-                            <Button variant="ghost" onClick={() => speak(challengeType === 'word' ? challengeWord.word : challengeWord.example)}>
+                            <Button variant="ghost" onClick={() => speak(challengeType === 'sentence' ? challengeWord.example : challengeWord.word)}>
                               <Volume2 /> 听发音
                             </Button>
                           </div>
@@ -2277,24 +2655,31 @@ export default function App() {
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-                    {/* Image Upload Area */}
+                    {/* File Upload Area */}
                     <div 
                       onClick={() => fileInputRef.current?.click()}
                       className={cn(
                         "relative h-48 rounded-3xl border-4 border-dashed border-pink-100 bg-pink-50/30 flex flex-col items-center justify-center cursor-pointer hover:border-pink-200 transition-all overflow-hidden group",
-                        selectedImage && "border-solid border-pink-300"
+                        selectedFile && "border-solid border-pink-300"
                       )}
                     >
-                      {selectedImage ? (
+                      {selectedFile ? (
                         <>
-                          <img src={selectedImage} alt="Preview" className="w-full h-full object-cover" />
+                          {selectedFile.startsWith('data:application/pdf') ? (
+                            <div className="flex flex-col items-center gap-2">
+                              <FileText className="w-16 h-16 text-pink-400" />
+                              <p className="text-pink-500 font-bold">PDF 已就绪</p>
+                            </div>
+                          ) : (
+                            <img src={selectedFile} alt="Preview" className="w-full h-full object-cover" />
+                          )}
                           <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                            <p className="text-white font-bold">点击更换图片</p>
+                            <p className="text-white font-bold">点击更换文件</p>
                           </div>
                           <button 
                             onClick={(e) => {
                               e.stopPropagation();
-                              setSelectedImage(null);
+                              setSelectedFile(null);
                             }}
                             className="absolute top-2 right-2 p-1 bg-white rounded-full text-pink-500 shadow-md hover:scale-110 transition-transform"
                           >
@@ -2306,8 +2691,8 @@ export default function App() {
                           <div className="bg-white p-4 rounded-full shadow-lg text-pink-400 mb-3 group-hover:scale-110 transition-transform">
                             <Camera size={32} />
                           </div>
-                          <p className="text-pink-400 font-bold">点击拍照或上传图片</p>
-                          <p className="text-pink-300 text-xs mt-1">自动识别课本中的单词</p>
+                          <p className="text-pink-400 font-bold">拍照、上传图片或 PDF</p>
+                          <p className="text-pink-300 text-xs mt-1">智能识别并提取学习单词</p>
                         </>
                       )}
                     </div>
@@ -2326,8 +2711,8 @@ export default function App() {
                   <input 
                     type="file" 
                     ref={fileInputRef}
-                    onChange={handleImageUpload}
-                    accept="image/*"
+                    onChange={handleFileUpload}
+                    accept="image/*,application/pdf"
                     capture="environment"
                     className="hidden"
                   />
@@ -2336,10 +2721,10 @@ export default function App() {
                     <Button 
                       onClick={handleGenerate} 
                       isLoading={isLoading}
-                      disabled={!inputText.trim() && !selectedImage}
+                      disabled={!inputText.trim() && !selectedFile}
                       className="text-xl px-12 py-4"
                     >
-                      {selectedImage ? "识别并生成 ✨" : "开始生成原件 ✨"}
+                      {selectedFile ? "智能识别并生成 ✨" : "开始生成原件 ✨"}
                     </Button>
                   </div>
                 </Card>
@@ -2398,7 +2783,7 @@ export default function App() {
                   )}
                 </AnimatePresence>
 
-                {activeChild.words.map((entry, idx) => (
+                {filteredWords.map((entry, idx) => (
                   <motion.div
                     key={entry.id || entry.word}
                     initial={{ x: -20, opacity: 0 }}
@@ -2410,12 +2795,14 @@ export default function App() {
                         <div className="flex-1">
                           <div className="flex items-center gap-4 mb-2">
                             <h3 className="text-3xl font-black text-pink-600">{entry.word}</h3>
-                            <span className="text-gray-400 font-mono text-lg">[{entry.phonetic}]</span>
+                            <span className="text-gray-400 font-mono text-lg">
+                              {entry.type === 'chinese' ? `(${entry.phonetic})` : `[${entry.phonetic}]`}
+                            </span>
                             <div className="flex gap-2">
                               <button 
                                 onClick={() => speak(entry.word)}
                                 disabled={isSpeaking}
-                                title="朗读单词"
+                                title={entry.type === 'chinese' ? "朗读汉字" : "朗读单词"}
                                 className={cn(
                                   "p-2 rounded-full transition-colors",
                                   isSpeaking ? "bg-gray-100 text-gray-300" : "bg-pink-50 text-pink-400 hover:bg-pink-100"
@@ -2438,6 +2825,15 @@ export default function App() {
                           <p className="text-xl font-bold text-gray-700 mb-4">
                             {entry.meaning}
                           </p>
+                          {entry.type === 'chinese' && entry.compounds && entry.compounds.length > 0 && (
+                            <div className="flex flex-wrap gap-2 mb-4">
+                              {entry.compounds.map((c, i) => (
+                                <span key={i} className="px-3 py-1 bg-pink-50 text-pink-600 rounded-full text-sm font-bold border border-pink-100">
+                                  {c}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                           <div className="bg-blue-50/50 p-4 rounded-2xl border border-blue-100 relative group/sentence">
                             <p className="text-blue-700 font-medium italic mb-1 pr-10">
                               "{entry.example}"
@@ -2538,9 +2934,9 @@ export default function App() {
                           selectedOption === option ? (
                             quizFeedback === 'correct' ? "border-green-400 bg-green-50 text-green-600" : "border-red-400 bg-red-50 text-red-600"
                           ) : (
-                            quizFeedback === 'correct' && option === words[flashcardIndex].word ? "border-green-400 bg-green-50 text-green-600" : "border-pink-100 hover:border-pink-200 bg-white"
+                            quizFeedback === 'correct' && option === activeChild.words[flashcardIndex].word ? "border-green-400 bg-green-50 text-green-600" : "border-pink-100 hover:border-pink-200 bg-white"
                           ),
-                          quizFeedback && option !== words[flashcardIndex].word && selectedOption !== option && "opacity-50"
+                          quizFeedback && option !== activeChild.words[flashcardIndex].word && selectedOption !== option && "opacity-50"
                         )}
                       >
                         {option}
@@ -2579,6 +2975,195 @@ export default function App() {
 
             {/* Practice View - Replaced by Quiz */}
 
+            {/* Recitation View */}
+            {viewMode === 'recitation' && (
+              <motion.div
+                key="recitation"
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                className="flex flex-col items-center"
+              >
+                <Card className="w-full max-w-2xl p-8 md:p-12 text-center relative overflow-hidden">
+                  <div className="mb-8">
+                    <span className="text-sm font-bold text-pink-400 uppercase tracking-widest">
+                      背诵模式 (根据含义回忆)
+                    </span>
+                    <h2 className="text-4xl font-black text-gray-800 mt-4 mb-6">
+                      {filteredWords[flashcardIndex].meaning}
+                    </h2>
+                    <p className="text-gray-500 italic">
+                      "{filteredWords[flashcardIndex].exampleTranslation}"
+                    </p>
+                  </div>
+
+                  <AnimatePresence>
+                    {!showFlashcardBack ? (
+                      <motion.div
+                        initial={{ y: 20, opacity: 0 }}
+                        animate={{ y: 0, opacity: 1 }}
+                        className="space-y-6"
+                      >
+                        <div className="relative">
+                          <input
+                            type="text"
+                            value={recitationInput}
+                            onChange={(e) => setRecitationInput(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleRecitationSubmit()}
+                            placeholder="在此输入你记下的内容..."
+                            className={cn(
+                              "w-full px-8 py-6 rounded-3xl text-3xl font-bold text-center border-4 outline-none transition-all",
+                              recitationFeedback === 'wrong' ? "border-red-400 bg-red-50 text-red-600 animate-shake" :
+                              "border-pink-100 focus:border-pink-300 bg-pink-50/30"
+                            )}
+                            autoFocus
+                          />
+                        </div>
+
+                        <div className="flex flex-col md:flex-row gap-4">
+                          <Button 
+                            onClick={handleRecitationSubmit} 
+                            disabled={!recitationInput.trim()}
+                            className="flex-1 py-6 text-xl"
+                          >
+                            提交核对
+                          </Button>
+                          <Button 
+                            variant="secondary"
+                            onClick={() => isRecording ? stopRecording() : startRecording(filteredWords[flashcardIndex].word)}
+                            className={cn(
+                              "flex-1 py-6 text-xl transition-all",
+                              isRecording ? "bg-red-500 text-white animate-pulse" : "bg-blue-50 text-blue-500"
+                            )}
+                          >
+                            {isRecording ? <MicOff className="mr-2" /> : <Mic className="mr-2" />} 语音背诵
+                          </Button>
+                        </div>
+
+                        <Button 
+                          variant="ghost"
+                          onClick={() => setShowFlashcardBack(true)}
+                          className="w-full text-gray-400"
+                        >
+                          不确定？点我查看提示
+                        </Button>
+                      </motion.div>
+                    ) : (
+                      <motion.div
+                        initial={{ y: 20, opacity: 0 }}
+                        animate={{ y: 0, opacity: 1 }}
+                        className="space-y-6"
+                      >
+                        <div className="p-8 bg-pink-50 rounded-[2rem] border-4 border-pink-100">
+                          <h3 className="text-5xl font-black text-pink-600 mb-2">
+                            {filteredWords[flashcardIndex].word}
+                          </h3>
+                          <p className="text-gray-400 font-mono text-xl mb-4">
+                            {filteredWords[flashcardIndex].type === 'chinese' ? `(${filteredWords[flashcardIndex].phonetic})` : `[${filteredWords[flashcardIndex].phonetic}]`}
+                          </p>
+                          <Button variant="ghost" onClick={() => speak(filteredWords[flashcardIndex].word)}>
+                            <Volume2 className="mr-2" /> 听发音
+                          </Button>
+                        </div>
+                        <div className="flex gap-4">
+                          <Button 
+                            onClick={() => {
+                              const word = filteredWords[flashcardIndex];
+                              const words = activeChild.words.map(w => w.id === word.id ? { ...w, isMastered: true } : w);
+                              updateActiveChild({ words });
+                              completeStudyAction(2);
+                              nextRecitation();
+                            }}
+                            className="flex-1 py-6 text-xl bg-green-500 hover:bg-green-600"
+                          >
+                            记住了
+                          </Button>
+                          <Button 
+                            variant="secondary"
+                            onClick={nextRecitation}
+                            className="flex-1 py-6 text-xl"
+                          >
+                            下一个
+                          </Button>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </Card>
+              </motion.div>
+            )}
+
+            {/* Dictation View */}
+            {viewMode === 'dictation' && (
+              <motion.div
+                key="dictation"
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                className="flex flex-col items-center"
+              >
+                <Card className="w-full max-w-2xl p-8 md:p-12 text-center relative overflow-hidden">
+                  <div className="mb-8">
+                    <span className="text-sm font-bold text-pink-400 uppercase tracking-widest">
+                      听写模式 (听音写词)
+                    </span>
+                    <div className="mt-8 flex flex-col items-center gap-6">
+                      <button 
+                        onClick={() => speak(filteredWords[flashcardIndex].word)}
+                        className="w-32 h-32 rounded-full bg-blue-50 text-blue-500 flex items-center justify-center hover:bg-blue-100 transition-all shadow-lg group"
+                      >
+                        <Volume2 size={64} className="group-hover:scale-110 transition-transform" />
+                      </button>
+                      <p className="text-gray-400 font-bold">点击按钮重新播放</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-6">
+                    <input
+                      type="text"
+                      value={practiceInput}
+                      onChange={(e) => setPracticeInput(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && !practiceFeedback && handleDictationSubmit()}
+                      placeholder="输入你听到的内容..."
+                      disabled={!!practiceFeedback}
+                      className={cn(
+                        "w-full px-8 py-6 rounded-3xl text-3xl font-bold text-center border-4 outline-none transition-all",
+                        practiceFeedback === 'correct' ? "border-green-400 bg-green-50 text-green-600" :
+                        practiceFeedback === 'wrong' ? "border-red-400 bg-red-50 text-red-600 animate-shake" :
+                        "border-pink-100 focus:border-pink-300 bg-pink-50/30"
+                      )}
+                      autoFocus
+                    />
+
+                    {practiceFeedback ? (
+                      <div className="space-y-4">
+                        <div className="p-6 bg-gray-50 rounded-3xl border-2 border-dashed border-gray-200">
+                          <p className="text-sm text-gray-400 mb-1">正确答案是：</p>
+                          <p className="text-3xl font-black text-gray-800">
+                            {filteredWords[flashcardIndex].word}
+                          </p>
+                        </div>
+                        <Button 
+                          onClick={nextDictation} 
+                          className="w-full py-6 text-2xl bg-yellow-400 hover:bg-yellow-500"
+                        >
+                          {flashcardIndex < filteredWords.length - 1 ? "下一个" : "完成练习"} <ArrowRight className="ml-2" />
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button 
+                        onClick={handleDictationSubmit}
+                        disabled={!practiceInput.trim()}
+                        className="w-full py-6 text-2xl"
+                      >
+                        提交答案
+                      </Button>
+                    )}
+                  </div>
+                </Card>
+              </motion.div>
+            )}
+
             {/* Flashcard View */}
             {viewMode === 'flashcard' && (
               <motion.div
@@ -2602,10 +3187,10 @@ export default function App() {
                     )}>
                       <Star className="text-yellow-400 mb-6 w-12 h-12 animate-pulse" fill="currentColor" />
                       <h2 className="text-6xl font-black text-pink-600 mb-4">
-                        {activeChild.words[flashcardIndex].word}
+                        {filteredWords[flashcardIndex].word}
                       </h2>
                       <p className="text-gray-400 font-mono text-xl">
-                        [{activeChild.words[flashcardIndex].phonetic}]
+                        {filteredWords[flashcardIndex].type === 'chinese' ? `(${filteredWords[flashcardIndex].phonetic})` : `[${filteredWords[flashcardIndex].phonetic}]`}
                       </p>
                       <p className="mt-8 text-pink-300 text-sm font-bold uppercase tracking-widest">
                         点击翻面查看含义
@@ -2618,14 +3203,23 @@ export default function App() {
                       !showFlashcardBack && "pointer-events-none"
                     )}>
                       <h2 className="text-4xl font-bold mb-6">
-                        {activeChild.words[flashcardIndex].meaning}
+                        {filteredWords[flashcardIndex].meaning}
                       </h2>
+                      {filteredWords[flashcardIndex].type === 'chinese' && filteredWords[flashcardIndex].compounds && (
+                        <div className="flex flex-wrap justify-center gap-2 mb-4">
+                          {filteredWords[flashcardIndex].compounds.map((c, i) => (
+                            <span key={i} className="px-3 py-1 bg-white/20 rounded-xl text-sm font-bold border border-white/30">
+                              {c}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       <div className="text-center space-y-4">
                         <p className="text-lg italic opacity-90">
-                          "{activeChild.words[flashcardIndex].example}"
+                          "{filteredWords[flashcardIndex].example}"
                         </p>
                         <p className="text-sm opacity-75">
-                          {activeChild.words[flashcardIndex].exampleTranslation}
+                          {filteredWords[flashcardIndex].exampleTranslation}
                         </p>
                       </div>
                       <Button 
@@ -2634,7 +3228,7 @@ export default function App() {
                         disabled={isSpeaking}
                         onClick={(e) => {
                           e.stopPropagation();
-                          speak(activeChild.words[flashcardIndex].word);
+                          speak(filteredWords[flashcardIndex].word);
                         }}
                       >
                         {isSpeaking ? <Loader2 className="animate-spin" /> : <Volume2 />} 发音
