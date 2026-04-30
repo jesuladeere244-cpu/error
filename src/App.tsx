@@ -174,56 +174,62 @@ async function evaluatePronunciation(targetText: string, audioBase64: string, ty
 }
 
 async function extractWordsFromFile(base64Data: string, grade: number): Promise<string[]> {
-  const mimeType = base64Data.split(';')[0].split(':')[1] || 'image/jpeg';
-  const isPdf = mimeType === 'application/pdf';
-
-  const prompt = isPdf 
-    ? `你是一个专业的文档分析助手。请从这个PDF文档中提取所有适合小学${grade}年级学习的英语单词或中文生字。
-  
-  要求：
-  1. 准确提取文档中的重点词汇。
-  2. 如果是英语单词，请保留完整拼写。
-  3. 如果是中文生字，请提取单个汉字或词语。
-  4. 请只返回提取到的单词或生字列表，用英文逗号隔开，不要有任何其他解释文字。
-  5. 如果文档内容太少，请返回空字符串。`
-    : `你是一个专业的OCR文字识别助手。请识别这张图片中的所有英语单词或中文生字。
-  这些通常是小学${grade}年级课本上的内容。
-  
-  要求：
-  1. 准确识别图片中的每一个文字。
-  2. 如果是英语单词，请保留完整拼写。
-  3. 如果是中文生字，请提取单个汉字或词语。
-  4. 请只返回识别到的单词或生字列表，用英文逗号隔开，不要有任何其他解释文字。
-  5. 如果图片模糊无法识别，请返回空字符串。`;
-  
-  const base64 = base64Data.split(',')[1];
-
   try {
+    const mimeType = base64Data.split(';')[0].split(':')[1] || 'image/jpeg';
+    const isPdf = mimeType === 'application/pdf';
+    const base64 = base64Data.split(',')[1];
+
+    if (!base64) {
+      throw new Error("文件转换失败，数据为空。");
+    }
+
+    const prompt = isPdf 
+      ? `你是一个专业的文档分析助手。请从这个PDF文档中识别并提取所有适合小学${grade}年级学力的英语单词或中文生字。
+    
+    注意：
+    1. 提取文档中的核心词汇。
+    2. 英语单词请保留完整。
+    3. 中文生字请提取单个生字或词组。
+    4. 仅返回结果列表，用英文逗号隔开，不要包含任何其他说明文字或 Markdown 标记。
+    5. 如果文档中没有找到明显的学习词汇，请返回空字符串。`
+      : `你是一个专业的文字识别(OCR)助手。请识别这张图片中的所有英语单词或中文生字。
+    这些通常是小学${grade}年级的学习内容。
+    
+    注意：
+    1. 准确识别每一个文字。
+    2. 仅返回识别到的单词或生字列表，用英文逗号隔开，不要包含任何其他多余文字。
+    3. 如果图片太模糊，请返回空字符串。`;
+
+    console.log(`Starting extraction for ${mimeType}, size: ${Math.round(base64.length / 1024)} KB`);
+
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { text: prompt },
-            { 
-              inlineData: { 
-                mimeType: mimeType, 
-                data: base64
-              } 
-            }
-          ]
-        }
-      ]
+      contents: [{
+        parts: [
+          { text: prompt },
+          { 
+            inlineData: { 
+              mimeType: mimeType, 
+              data: base64
+            } 
+          }
+        ]
+      }]
     });
 
-    const text = response.text;
-    if (!text || text.trim() === "") return [];
-    // Clean up the response in case the model adds extra characters
-    const cleanedText = text.replace(/[`]/g, '').trim();
-    return cleanedText.split(/[,\s\n，]+/).filter(w => w.trim().length > 0);
+    const text = response.text || "";
+    console.log("Extraction raw response:", text);
+
+    if (!text.trim()) return [];
+    
+    // Clean up response: remove any backticks or extra text
+    const cleanedText = text.replace(/[`]|json|/gi, '').trim();
+    const words = cleanedText.split(/[,\s\n，]+/).filter(w => w.trim().length > 0);
+    
+    console.log(`Extracted ${words.length} words.`);
+    return words;
   } catch (error) {
-    console.error("Gemini OCR Error:", error);
+    console.error("Gemini Extraction (OCR) Error:", error);
     throw error;
   }
 }
@@ -1560,9 +1566,15 @@ export default function App() {
       } else {
         alert("未能识别到内容，请提示尝试换个角度拍照或确保文件包含文字内容。");
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Generate Error:", error);
-      alert("生成失败，可能是网络问题或图片不够清晰，请稍后再试。");
+      let errorMsg = "生成失败，可能是网络问题或文件内容过于复杂。";
+      if (error?.message?.includes("Safety")) {
+        errorMsg = "识别被拦截，请确保文件内容适合学生学习。";
+      } else if (error?.message?.includes("Quota") || error?.message?.includes("429")) {
+        errorMsg = "请求太频繁啦，请稍后再试。";
+      }
+      alert(errorMsg + "\n您可以尝试换个角度拍照或手动输入单词。");
     } finally {
       setIsLoading(false);
     }
