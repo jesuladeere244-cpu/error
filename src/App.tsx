@@ -117,7 +117,15 @@ interface StudyList {
 }
 
 // --- Gemini Service ---
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const getGeminiKey = () => {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) {
+    console.warn("GEMINI_API_KEY is missing from environment variables.");
+  }
+  return key;
+};
+
+const ai = new GoogleGenAI({ apiKey: getGeminiKey() || "YOUR_API_KEY_HERE" });
 
 async function evaluatePronunciation(targetText: string, audioBase64: string, type: 'english' | 'chinese'): Promise<PronunciationResult> {
   const prompt = type === 'english' 
@@ -140,36 +148,37 @@ async function evaluatePronunciation(targetText: string, audioBase64: string, ty
   
   请返回 JSON 格式，包含 score (数字) 和 feedback (简短的中文鼓励性评价)。`;
 
+  if (!getGeminiKey()) {
+    return { score: 0, feedback: "未检测到 API 密钥，请在设置中配置。" };
+  }
+
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: [
-        { text: prompt },
-        { 
-          inlineData: { 
-            mimeType: "audio/webm", // Gemini supports webm/mp4/etc
-            data: audioBase64 
-          } 
-        }
-      ],
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            score: { type: Type.NUMBER },
-            feedback: { type: Type.STRING },
-          },
-          required: ["score", "feedback"],
-        },
+      model: "gemini-1.5-flash",
+      contents: {
+        parts: [
+          { text: prompt },
+          { 
+            inlineData: { 
+              mimeType: "audio/webm", 
+              data: audioBase64 
+            } 
+          }
+        ]
       },
+      config: {
+        responseMimeType: "application/json"
+      }
     });
 
-    const text = response.text;
-    return JSON.parse(text || '{"score": 0, "feedback": "哎呀，没听清，再试一次吧！"}');
+    const result = JSON.parse(response.text || "{}");
+    return {
+      score: result.score || 0,
+      feedback: result.feedback || "未能得出评价，请重试。"
+    };
   } catch (error) {
-    console.error("Gemini Evaluation Error:", error);
-    return { score: 0, feedback: "评估出错了，请稍后再试。" };
+    console.error("Pronunciation Eval Error:", error);
+    return { score: 0, feedback: "评价过程中出错了，请稍后再试。" };
   }
 }
 
@@ -180,56 +189,58 @@ async function extractWordsFromFile(base64Data: string, grade: number): Promise<
     const base64 = base64Data.split(',')[1];
 
     if (!base64) {
-      throw new Error("文件转换失败，数据为空。");
+      throw new Error("文件数据为空，请重试。");
+    }
+
+    if (!getGeminiKey()) {
+      throw new Error("API 密钥未配置。");
     }
 
     const prompt = isPdf 
-      ? `你是一个专业的文档分析助手。请从这个PDF文档中识别并提取所有适合小学${grade}年级学力的英语单词或中文生字。
+      ? `你是一个专业的文档分析助手。请从这个 PDF 文档中识别并提取所有适合小学 ${grade} 年级学习的英语单词或中文生字。
     
-    注意：
-    1. 提取文档中的核心词汇。
-    2. 英语单词请保留完整。
-    3. 中文生字请提取单个生字或词组。
-    4. 仅返回结果列表，用英文逗号隔开，不要包含任何其他说明文字或 Markdown 标记。
-    5. 如果文档中没有找到明显的学习词汇，请返回空字符串。`
-      : `你是一个专业的文字识别(OCR)助手。请识别这张图片中的所有英语单词或中文生字。
-    这些通常是小学${grade}年级的学习内容。
+    提取原则：
+    1. 仅提取重点词汇。
+    2. 英语单词保留完整形式。
+    3. 中文生字提取单词或单个汉字。
+    4. 结果仅返回单词列表，用英文逗号隔开。不要包含 Markdown 或多余文字。`
+      : `你是一个专业的 OCR 文字识别助手。请识别这张图片中的所有英语单词或中文生字。
+    这些内容适合小学 ${grade} 年级学习。
     
-    注意：
-    1. 准确识别每一个文字。
-    2. 仅返回识别到的单词或生字列表，用英文逗号隔开，不要包含任何其他多余文字。
-    3. 如果图片太模糊，请返回空字符串。`;
-
-    console.log(`Starting extraction for ${mimeType}, size: ${Math.round(base64.length / 1024)} KB`);
+    结果仅返回单词列表，用英文逗号隔开。不要包含 Markdown 或多余文字。`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: [{
+      model: "gemini-1.5-flash",
+      contents: {
         parts: [
           { text: prompt },
           { 
             inlineData: { 
-              mimeType: mimeType, 
-              data: base64
+              mimeType: mimeType,
+              data: base64 
             } 
           }
         ]
-      }]
+      },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            words: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            }
+          },
+          required: ["words"]
+        }
+      }
     });
 
-    const text = response.text || "";
-    console.log("Extraction raw response:", text);
-
-    if (!text.trim()) return [];
-    
-    // Clean up response: remove any backticks or extra text
-    const cleanedText = text.replace(/[`]|json|/gi, '').trim();
-    const words = cleanedText.split(/[,\s\n，]+/).filter(w => w.trim().length > 0);
-    
-    console.log(`Extracted ${words.length} words.`);
-    return words;
+    const result = JSON.parse(response.text || "{\"words\": []}");
+    return result.words || [];
   } catch (error) {
-    console.error("Gemini Extraction (OCR) Error:", error);
+    console.error("Extraction Error:", error);
     throw error;
   }
 }
@@ -237,23 +248,26 @@ async function extractWordsFromFile(base64Data: string, grade: number): Promise<
 async function generateWordDetails(words: string[], grade: number): Promise<WordEntry[]> {
   if (words.length === 0) return [];
   
-  const prompt = `你是一个小学老师。请为以下${grade}年级单词或生字提供详细解析。
-  列表：${words.join(', ')}
+  if (!getGeminiKey()) {
+    throw new Error("API 密钥未配置。");
+  }
+
+  const prompt = `你是一个专业的教育内容生成助手。请为以下小学 ${grade} 年级的单词提供详细解析：
+  ${words.join(', ')}
   
   要求：
-  1. 如果是英语单词，提供音标；如果是中文生字，提供拼音。
-  2. 提供准确的中文含义（如果是英语）或英文含义/简单中文解释（如果是中文），适合${grade}年级学生理解。
+  1. 提供准确的音标（英语）或拼音（中文）。
+  2. 给出简洁易懂的中文释义，适合 ${grade} 年级学生理解。
   3. 提供一个简单有趣的例句，并附带翻译。
-  4. 如果是中文生字，请额外提供2-3个常用的组词（compounds）。
-  5. 例句要贴近${grade}年级小学生的日常生活。
-  6. 标记类型 type 为 'english' 或 'chinese'。
+  4. 如果是中文生字，请额外提供 2-3 个常用的组词（compounds）。
+  5. 标记类型 type 为 'english' 或 'chinese'。
   
   请以 JSON 数组格式返回。`;
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: prompt,
+      model: "gemini-1.5-flash",
+      contents: { parts: [{ text: prompt }] },
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -279,12 +293,10 @@ async function generateWordDetails(words: string[], grade: number): Promise<Word
     const text = response.text;
     return JSON.parse(text || "[]");
   } catch (error) {
-    console.error("Gemini API Error:", error);
+    console.error("Gemini Details Generation Error:", error);
     throw error;
   }
 }
-
-// --- Components ---
 
 // --- Components ---
 
@@ -1544,7 +1556,9 @@ export default function App() {
       }
 
       if (wordsToProcess.length > 0) {
-        const details = await generateWordDetails(wordsToProcess, activeChild.grade);
+        // Slice to 30 words max for stability
+        const wordsToGetDetailsFor = wordsToProcess.slice(0, 30);
+        const details = await generateWordDetails(wordsToGetDetailsFor, activeChild.grade);
         const processedDetails = details.map(d => ({
           ...d,
           id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
@@ -1564,17 +1578,23 @@ export default function App() {
         setInputText('');
         setSelectedFile(null);
       } else {
-        alert("未能识别到内容，请提示尝试换个角度拍照或确保文件包含文字内容。");
+        alert("未能识别到内容，请尝试换个角度拍照或通过手动输入单词。");
       }
     } catch (error: any) {
-      console.error("Generate Error:", error);
-      let errorMsg = "生成失败，可能是网络问题或文件内容过于复杂。";
-      if (error?.message?.includes("Safety")) {
+      console.error("Generate Error details:", error);
+      let errorMsg = "生成失败，可能是网络问题。";
+      
+      if (error?.message?.includes("API key not found") || error?.message?.includes("INVALID_ARGUMENT")) {
+        errorMsg = "未检测到有效的 API 密钥。如果您已部署，请在部署平台（如 Vercel）的环境变量中添加 GEMINI_API_KEY。";
+      } else if (error?.message?.includes("Safety")) {
         errorMsg = "识别被拦截，请确保文件内容适合学生学习。";
       } else if (error?.message?.includes("Quota") || error?.message?.includes("429")) {
         errorMsg = "请求太频繁啦，请稍后再试。";
+      } else if (error?.message) {
+        errorMsg = `出现错误: ${error.message}`;
       }
-      alert(errorMsg + "\n您可以尝试换个角度拍照或手动输入单词。");
+      
+      alert(errorMsg + "\n您可以尝试换个角度拍照或采用手动输入方式。");
     } finally {
       setIsLoading(false);
     }
